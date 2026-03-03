@@ -1,0 +1,104 @@
+
+
+using SharpestLlmStudio.Monitoring;
+using SharpestLlmStudio.Runtime;
+using SharpestLlmStudio.Shared;
+using SharpestLlmStudio.WebApp.ViewModels;
+
+namespace SharpestLlmStudio.WebApp
+{
+    public class Program
+    {
+        public static void Main(string[] args)
+        {
+            var builder = WebApplication.CreateBuilder(args);
+
+            WebAppSettings webAppSettings = builder.Configuration.GetSection("WebAppSettings").Get<WebAppSettings>() ?? new WebAppSettings();
+
+            // CORS für API-Zugriff
+            const string CorsPolicy = "AllowApi";
+            builder.Services.AddCors(options =>
+            {
+                options.AddPolicy(CorsPolicy, policy =>
+                {
+                    policy
+                        .AllowAnyHeader()
+                        .AllowAnyMethod()
+                        .AllowCredentials()
+                        .SetIsOriginAllowed(_ => true);
+                });
+            });
+
+            // StaticLogger init
+            StaticLogger.InitializeLogFiles(webAppSettings.LogDirectory, webAppSettings.CreateLogFile, webAppSettings.MaxPreviousLogFiles);
+            StaticLogger.SetUiContext(SynchronizationContext.Current ?? new SynchronizationContext());
+
+            // Optional singleton GpuMonitor
+            if (webAppSettings.EnableMonitoring)
+            {
+                builder.Services.AddSingleton<GpuMonitor>();
+            }
+
+            // ApiClient + WebAppSettings
+            builder.Services.AddSingleton(webAppSettings);
+            builder.Services.AddSingleton<LlamaCppClient>(provider => new LlamaCppClient(webAppSettings));
+
+            // HTTPS-Umleitung und HSTS aktivieren
+            builder.Services.AddHttpsRedirection(options =>
+            {
+                options.RedirectStatusCode = StatusCodes.Status308PermanentRedirect;
+            });
+
+            builder.Services.AddHsts(options =>
+            {
+                options.Preload = true;
+                options.IncludeSubDomains = true;
+                options.MaxAge = TimeSpan.FromDays(365);
+            });
+
+            // Antiforgery-Cookie für die Sicherstellung von SameSite-Attributen
+            builder.Services.AddAntiforgery(options =>
+            {
+                options.Cookie.SameSite = SameSiteMode.None;
+                options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+                options.Cookie.HttpOnly = true;
+                options.HeaderName = "X-CSRF-TOKEN";
+            });
+
+            builder.Services.AddRazorPages();
+            builder.Services.AddServerSideBlazor();
+            builder.Services.AddSignalR();
+            builder.Services.AddScoped<HomeViewModel>();
+            // builder.Services.AddScoped<ContextViewModel>();
+
+            var app = builder.Build();
+
+            // HTTP-Pipeline konfigurieren
+            if (!app.Environment.IsDevelopment())
+            {
+                app.UseExceptionHandler("/Error");
+            }
+
+            app.UseHsts();
+            app.UseHttpsRedirection();
+
+            app.UseStaticFiles();
+
+            app.UseRouting();
+
+            app.UseCors(CorsPolicy);
+
+            app.UseAntiforgery();
+
+            // WebSockets für Blazor verwenden
+            app.UseWebSockets();
+            app.UseAuthorization();
+
+            // Blazor Server-Endpunkte
+            app.MapBlazorHub();
+            app.MapFallbackToPage("/_Host");
+
+            app.Run();
+        }
+    }
+}

@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="SharpestLlmStudio.Monitoring/SharpestLlmStudio.Monitoring.csproj" />
+  <Project Path="SharpestLlmStudio.Runtime/SharpestLlmStudio.Runtime.csproj" />
+  <Project Path="SharpestLlmStudio.Shared/SharpestLlmStudio.Shared.csproj" />
+  <Project Path="SharpestLlmStudio.WebApp/SharpestLlmStudio.WebApp.csproj" />
+</Solution>

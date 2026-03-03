@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Radzen.Blazor" Version="9.0.7" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpestLlmStudio.Monitoring\SharpestLlmStudio.Monitoring.csproj" />
+    <ProjectReference Include="..\SharpestLlmStudio.Runtime\SharpestLlmStudio.Runtime.csproj" />
+    <ProjectReference Include="..\SharpestLlmStudio.Shared\SharpestLlmStudio.Shared.csproj" />
+  </ItemGroup>
+
+</Project>
