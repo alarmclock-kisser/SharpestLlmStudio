@@ -98,6 +98,28 @@ namespace SharpestLlmStudio.WebApp
             app.MapRazorComponents<App>()
                 .AddInteractiveServerRenderMode();
 
+            // Kill llama-server processes on app shutdown (including debug stop)
+            if (webAppSettings.KillExistingServerInstancesBeforeLoad)
+            {
+                void KillLlamaServersOnShutdown()
+                {
+                    try
+                    {
+                        var client = app.Services.GetService<LlamaCppClient>();
+                        int? killed = client?.KillAllLlamaServerExeInstances();
+                        if (killed is > 0)
+                        {
+                            StaticLogger.Log($"[Shutdown] Killed {killed.Value} llama-server instance(s) during app shutdown.");
+                        }
+                    }
+                    catch { }
+                }
+
+                var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+                lifetime.ApplicationStopping.Register(KillLlamaServersOnShutdown);
+                AppDomain.CurrentDomain.ProcessExit += (_, _) => KillLlamaServersOnShutdown();
+            }
+
             app.Run();
         }
     }

@@ -1,26 +1,81 @@
 ﻿@inherits LayoutComponentBase
 
-<RadzenLayout>
-    <RadzenHeader>
-        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0" class="rz-p-2">
-            <RadzenSidebarToggle Click="@(() => sidebarExpanded = !sidebarExpanded)" />
-            <RadzenText TextStyle="TextStyle.H5" class="rz-mb-0 rz-ml-2" Text="SharpestLlmStudio" />
-        </RadzenStack>
-    </RadzenHeader>
+<div class="layout-shell @(isResizing ? "resizing" : string.Empty)"
+     @onmousemove="HandleResizeMouseMove"
+     @onmouseup="StopResizing"
+     @onmouseleave="StopResizing">
+    <RadzenLayout>
+        <RadzenHeader>
+            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" class="rz-p-2">
+                <RadzenSidebarToggle Click="ToggleSidebar" />
+                <RadzenText TextStyle="TextStyle.H5" class="rz-mb-0" Text="SharpestLlmStudio" />
+                @if (!sidebarExpanded)
+                {
+                    <RadzenBadge Text="@($"({sidebarLogCount})")" BadgeStyle="BadgeStyle.Info" Variant="Variant.Flat" class="rz-ml-2" />
+                }
+            </RadzenStack>
+        </RadzenHeader>
 
-    <RadzenSidebar @bind-Expanded="sidebarExpanded" style="width:250px;">
-        <RadzenPanelMenu>
-            <RadzenPanelMenuItem Text="Home" Path="" Icon="home" />
-        </RadzenPanelMenu>
-    </RadzenSidebar>
+        <RadzenSidebar @bind-Expanded="sidebarExpanded" style="@($"width:{sidebarWidthPx}px;")" class="app-sidebar">
+            <div class="sidebar-content-root">
+                <NavMenu SidebarExpanded="sidebarExpanded" LogCountChanged="OnLogCountChanged" />
+                @if (sidebarExpanded)
+                {
+                    <div class="sidebar-resize-handle" @onmousedown="StartResizing" title="Sidebar-Breite ändern">
+                        <RadzenIcon Icon="drag_indicator" />
+                    </div>
+                }
+            </div>
+        </RadzenSidebar>
 
-    <RadzenBody>
-        <div class="rz-p-4">
-            @Body
-        </div>
-    </RadzenBody>
-</RadzenLayout>
+        <RadzenBody>
+            <div class="rz-p-4">
+                @Body
+            </div>
+        </RadzenBody>
+    </RadzenLayout>
+</div>
 
 @code {
     bool sidebarExpanded = true;
+    bool isResizing = false;
+    int sidebarWidthPx = 320;
+    int sidebarLogCount = 0;
+
+    private void ToggleSidebar()
+    {
+        this.sidebarExpanded = !this.sidebarExpanded;
+        this.isResizing = false;
+    }
+
+    private void StartResizing(MouseEventArgs _)
+    {
+        if (!this.sidebarExpanded)
+        {
+            return;
+        }
+
+        this.isResizing = true;
+    }
+
+    private void HandleResizeMouseMove(MouseEventArgs e)
+    {
+        if (!this.isResizing || !this.sidebarExpanded)
+        {
+            return;
+        }
+
+        this.sidebarWidthPx = Math.Clamp((int) e.ClientX, 260, 720);
+    }
+
+    private void StopResizing(MouseEventArgs _)
+    {
+        this.isResizing = false;
+    }
+
+    private Task OnLogCountChanged(int count)
+    {
+        this.sidebarLogCount = count;
+        return Task.CompletedTask;
+    }
 }

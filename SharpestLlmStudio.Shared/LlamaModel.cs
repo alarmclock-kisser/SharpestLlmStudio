@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text;
+using System.IO;
 
 namespace SharpestLlmStudio.Shared
 {
@@ -13,6 +14,21 @@ namespace SharpestLlmStudio.Shared
         public string? MmprojFilePath { get; set; }
 
         public double? ParametersB { get; set; } = null;
+
+        public double SizeInMb { get; set; } = 0;
+
+        public DateTime LastModified
+        {
+            get
+            {
+                var modelTime = File.GetLastWriteTime(this.ModelFilePath);
+                var mmprojTime = string.IsNullOrEmpty(this.MmprojFilePath) ? modelTime : File.GetLastWriteTime(this.MmprojFilePath);
+                return modelTime > mmprojTime ? modelTime : mmprojTime;
+            }
+        }
+
+
+        public string DisplayName => $"{(File.Exists(this.MmprojFilePath) ? "[VL] " : "[ ≡ ] ")}{this.Name} <{(this.ParametersB.HasValue ? $"{(this.ParametersB < 1 ? $"{(int) (this.ParametersB * 1000)}M" : $"{(int) (this.ParametersB)}B")}" : "?")}> ({(this.SizeInMb / 1024.0):F3} GB)";
 
 
         public LlamaModelInfo(string modelRootDirectory)
@@ -53,6 +69,13 @@ namespace SharpestLlmStudio.Shared
                     throw new Exception($"Multiple .gguf model files found but no non-mmproj file found in directory: {modelRootDirectory}");
                 }
             }
+            // Get size of model file and mmproj file (if exists)
+            long modelFileSize = new FileInfo(this.ModelFilePath).Length;
+            if (File.Exists(this.MmprojFilePath))
+            {
+                modelFileSize += new FileInfo(this.MmprojFilePath).Length;
+            }
+            this.SizeInMb = modelFileSize / (1024.0 * 1024.0);
 
             // Try to parse parameters from file name, e.g. "model-7b.gguf" or "model-0.8b.gguf" or "model-258m.gguf"
             var fileName = Path.GetFileNameWithoutExtension(this.ModelFilePath);

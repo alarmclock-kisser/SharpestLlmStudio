@@ -2,117 +2,342 @@
 @page "/home"
 @rendermode InteractiveServer
 
+@using Microsoft.AspNetCore.Components.Forms
 @using SharpestLlmStudio.Shared
 @using SharpestLlmStudio.WebApp.ViewModels
 
 @inject HomeViewModel VM
+@inject IJSRuntime JS
 @implements IDisposable
 
 <PageTitle>Home – SharpestLlmStudio</PageTitle>
 
-<RadzenStack Gap="1rem">
-
-    @* ───────── Model Management Card ───────── *@
-    <RadzenCard>
-        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" class="rz-mb-4">
+<RadzenStack Gap="1rem" class="home-shell">
+    @if (!string.IsNullOrWhiteSpace(VM.LastActionMessage))
+    {
+        <RadzenAlert AlertStyle="AlertStyle.Info" Shade="Shade.Lighter" ShowIcon="true">@VM.LastActionMessage</RadzenAlert>
+    }
+    <RadzenCard class="chat-card">
+        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" class="rz-mb-2">
             <RadzenIcon Icon="memory" />
             <RadzenText TextStyle="TextStyle.H5" Text="Model Management" class="rz-mb-0" />
-            <RadzenBadge BadgeStyle="@(VM.IsLoaded ? BadgeStyle.Success : BadgeStyle.Secondary)"
-                         Text="@(VM.IsLoaded ? "Loaded" : "Not Loaded")" />
+            <div style="flex:1"></div>
+            @if (!VM.IsModelPanelExpanded)
+            {
+                <RadzenBadge BadgeStyle="@(VM.IsLoaded ? BadgeStyle.Success : BadgeStyle.Danger)"
+                             Text="@(VM.IsLoaded ? "Loaded" : "Not Loaded")" />
+                @if (VM.IsLoaded && VM.LoadedModel != null)
+                {
+                    <RadzenText class="collapsed-model-name" Text="@($"({VM.LoadedModel.Name})")" TextStyle="TextStyle.Caption" />
+                }
+            }
+            <RadzenButton Icon="@(VM.IsModelPanelExpanded ? "remove" : "add")" Size="ButtonSize.Small" class="collapse-btn" Click="ToggleModelExpandedAsync" />
         </RadzenStack>
 
-        <RadzenStack Gap="1rem">
+        <div class="collapsible @(VM.IsModelPanelExpanded ? "expanded" : "collapsed")">
+            <RadzenStack Gap="1rem" class="collapsible-inner">
+                <RadzenFormField Text="Model" Variant="Variant.Outlined" Style="width:100%;">
+                    <ChildContent>
+                        <RadzenDropDown @bind-Value="VM.SelectedModelName"
+                                        Data="@VM.LlamaModels"
+                                        TextProperty="DisplayName"
+                                        ValueProperty="Name"
+                                        Placeholder="Select a model…"
+                                        Disabled="@(VM.IsLoaded || VM.IsBusy)"
+                                        Style="width:100%;"
+                                        Change="@OnSelectedModelChanged" />
+                    </ChildContent>
+                </RadzenFormField>
 
-            @* Model dropdown *@
-            <RadzenFormField Text="Model" Variant="Variant.Outlined" Style="width:100%;">
-                <ChildContent>
-                    <RadzenDropDown @bind-Value="VM.SelectedModelName"
-                                    Data="@VM.LlamaModels"
-                                    TextProperty="Name"
-                                    ValueProperty="Name"
-                                    Placeholder="Select a model…"
-                                    Disabled="@(VM.IsLoaded || VM.IsBusy)"
-                                    Style="width:100%;"
-                                    Change="@OnSelectedModelChanged" />
-                </ChildContent>
-            </RadzenFormField>
+                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
+                    <RadzenCheckBox @bind-Value="VM.UseMmproj" Disabled="@(!HasMmproj || VM.IsLoaded || VM.IsBusy)" TValue="bool" />
+                    <RadzenLabel Text="@MmprojLabel" Style="cursor:pointer;" />
+                </RadzenStack>
 
-            @* Mmproj checkbox *@
-            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
-                <RadzenCheckBox @bind-Value="VM.UseMmproj"
-                                Disabled="@(!HasMmproj || VM.IsLoaded || VM.IsBusy)"
-                                TValue="bool" />
-                <RadzenLabel Text="@MmprojLabel" Style="cursor:pointer;" />
+                <RadzenFormField Text="Context Size" Variant="Variant.Outlined" Style="width:100%;">
+                    <ChildContent>
+                        <RadzenNumeric @bind-Value="VM.ContextSize" Min="128" Max="131072" Step="256" Disabled="@(VM.IsLoaded || VM.IsBusy)" TValue="int" />
+                    </ChildContent>
+                </RadzenFormField>
+
+                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
+                    <RadzenCheckBox @bind-Value="VM.UseFlashAttention" Disabled="@(VM.IsLoaded || VM.IsBusy)" TValue="bool" />
+                    <RadzenLabel Text="Flash Attention" Style="cursor:pointer;" />
+                </RadzenStack>
+
+                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" Wrap="FlexWrap.Wrap">
+                    <RadzenButton Text="@(VM.IsLoaded ? "Unload Model" : "Load Model")"
+                                  Icon="@(VM.IsLoaded ? "eject" : "download")"
+                                  ButtonStyle="@(VM.IsLoaded ? ButtonStyle.Danger : ButtonStyle.Primary)"
+                                  IsBusy="@VM.IsBusy"
+                                  Disabled="@(VM.IsBusy || (!VM.IsLoaded && string.IsNullOrEmpty(VM.SelectedModelName)))"
+                                  Click="@OnToggleModelAsync" />
+
+                    <RadzenButton Text="Kill all llama-server.exe"
+                                  Icon="warning"
+                                  ButtonStyle="ButtonStyle.Danger"
+                                  Disabled="@VM.IsBusy"
+                                  Click="@OnKillAllLlamaServerInstancesAsync" />
+                </RadzenStack>
+
+                <RadzenText TextStyle="TextStyle.Body2" class="rz-color-on-surface-variant">@VM.ModelLoadingTimeString</RadzenText>
+
+                @if (!string.IsNullOrEmpty(VM.LastLoadError))
+                {
+                    <RadzenAlert AlertStyle="AlertStyle.Danger" Shade="Shade.Lighter" AllowClose="true" ShowIcon="true" Close="@(() => VM.LastLoadError = null)">
+                        @VM.LastLoadError
+                    </RadzenAlert>
+                }
+
+                @if (VM.LoadedModel != null)
+                {
+                    <RadzenAlert AlertStyle="AlertStyle.Success" Shade="Shade.Lighter" ShowIcon="true">
+                        <strong>Loaded:</strong> @VM.LoadedModel.Name
+                        @if (VM.UseMmproj && !string.IsNullOrEmpty(VM.LoadedModel.MmprojFilePath))
+                        {
+                            <text> — Multimodal projection active</text>
+                        }
+                    </RadzenAlert>
+                }
             </RadzenStack>
-
-            @* Context size *@
-            <RadzenFormField Text="Context Size" Variant="Variant.Outlined" Style="width:100%;">
-                <ChildContent>
-                    <RadzenNumeric @bind-Value="VM.ContextSize"
-                                   Min="128" Max="131072" Step="256"
-                                   Disabled="@(VM.IsLoaded || VM.IsBusy)"
-                                   TValue="int" />
-                </ChildContent>
-            </RadzenFormField>
-
-            @* Flash Attention checkbox *@
-            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
-                <RadzenCheckBox @bind-Value="VM.UseFlashAttention"
-                                Disabled="@(VM.IsLoaded || VM.IsBusy)"
-                                TValue="bool" />
-                <RadzenLabel Text="Flash Attention" Style="cursor:pointer;" />
-            </RadzenStack>
-
-            @* Load / Unload button *@
-            <RadzenButton Text="@(VM.IsLoaded ? "Unload Model" : "Load Model")"
-                          Icon="@(VM.IsLoaded ? "eject" : "download")"
-                          ButtonStyle="@(VM.IsLoaded ? ButtonStyle.Danger : ButtonStyle.Primary)"
-                          IsBusy="@VM.IsBusy"
-                          Disabled="@(VM.IsBusy || (!VM.IsLoaded && string.IsNullOrEmpty(VM.SelectedModelName)))"
-                          Click="@OnToggleModelAsync"
-                          Style="width:fit-content;" />
-
-            @* Status text *@
-            <RadzenText TextStyle="TextStyle.Body2" class="rz-color-on-surface-variant">
-                @VM.ModelLoadingTimeString
-            </RadzenText>
-
-            @* Error banner *@
-            @if (!string.IsNullOrEmpty(VM.LastLoadError))
-            {
-                <RadzenAlert AlertStyle="AlertStyle.Danger" Shade="Shade.Lighter" AllowClose="true" ShowIcon="true"
-                             Close="@(() => VM.LastLoadError = null)">
-                    @VM.LastLoadError
-                </RadzenAlert>
-            }
-
-            @* Loaded-model banner *@
-            @if (VM.LoadedModel != null)
-            {
-                <RadzenAlert AlertStyle="AlertStyle.Success" Shade="Shade.Lighter" AllowClose="false" ShowIcon="true">
-                    <strong>Loaded:</strong> @VM.LoadedModel.Name
-                    @if (VM.UseMmproj && !string.IsNullOrEmpty(VM.LoadedModel.MmprojFilePath))
-                    {
-                        <text> — Multimodal projection active</text>
-                    }
-                </RadzenAlert>
-            }
-
-        </RadzenStack>
+        </div>
     </RadzenCard>
 
+    <RadzenCard>
+        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" class="rz-mb-2">
+            <RadzenIcon Icon="save" />
+            <RadzenText TextStyle="TextStyle.H6" Text="Context Management" class="rz-mb-0" />
+            <div style="flex:1"></div>
+            <RadzenButton Icon="@(VM.IsContextPanelExpanded ? "remove" : "add")" Size="ButtonSize.Small" class="collapse-btn" Click="ToggleContextExpandedAsync" />
+        </RadzenStack>
+
+        <div class="collapsible @(VM.IsContextPanelExpanded ? "expanded" : "collapsed")">
+            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap" class="collapsible-inner">
+                <RadzenFormField Text="Save Name" Variant="Variant.Outlined">
+                    <ChildContent>
+                        <RadzenTextBox @bind-Value="VM.ContextSaveName" Name="contextSaveName" Style="width:180px;" />
+                    </ChildContent>
+                </RadzenFormField>
+
+                <RadzenButton Text="Save Context" Icon="save" ButtonStyle="ButtonStyle.Primary" Disabled="@(!VM.IsLoaded || VM.IsBusy || VM.IsGenerating)" Click="@OnSaveContextAsync" />
+
+                <RadzenDropDown Data="VM.ContextFiles" @bind-Value="VM.SelectedContextFilePath" Placeholder="Saved contexts..." Style="width:320px;" Name="selectedContextFile" />
+
+                <RadzenButton Text="Load" Icon="upload" ButtonStyle="ButtonStyle.Info" Disabled="@(string.IsNullOrWhiteSpace(VM.SelectedContextFilePath) || VM.IsGenerating)" Click="@OnLoadContextAsync" />
+                <RadzenButton Text="Delete" Icon="delete" ButtonStyle="ButtonStyle.Danger" Disabled="@(string.IsNullOrWhiteSpace(VM.SelectedContextFilePath) || VM.IsGenerating)" Click="@OnDeleteContextAsync" />
+            </RadzenStack>
+        </div>
+    </RadzenCard>
+
+    <RadzenCard>
+        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" class="rz-mb-2">
+            <RadzenIcon Icon="hub" />
+            <RadzenText TextStyle="TextStyle.H6" Text="Knowledge Base" class="rz-mb-0" />
+            <div style="flex:1"></div>
+            <RadzenButton Icon="@(VM.IsKnowledgePanelExpanded ? "remove" : "add")" Size="ButtonSize.Small" class="collapse-btn" Click="ToggleKnowledgeExpandedAsync" />
+        </RadzenStack>
+
+        <div class="collapsible @(VM.IsKnowledgePanelExpanded ? "expanded" : "collapsed")">
+            <RadzenStack Gap="0.6rem" class="collapsible-inner">
+                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap">
+                    <RadzenFormField Text="Key" Variant="Variant.Outlined">
+                        <ChildContent>
+                            <RadzenTextBox @bind-Value="VM.KnowledgeKey" Name="knowledgeKey" Style="width:220px;" />
+                        </ChildContent>
+                    </RadzenFormField>
+
+                    <RadzenButton Text="Upsert" Icon="library_add" ButtonStyle="ButtonStyle.Primary" Click="@OnUpsertKnowledgeAsync" />
+                    <RadzenButton Text="Browse Files" Icon="upload_file" ButtonStyle="ButtonStyle.Info" Click="OnBrowseKnowledgeFilesClick" />
+                    <InputFile id="knowledgeFilePicker" OnChange="OnKnowledgeFilesSelected" multiple accept=".json,.xml,.txt,*/*" style="display:none;" />
+                    <RadzenButton Text="Save Store" Icon="file_download" ButtonStyle="ButtonStyle.Light" Click="@OnSaveKnowledgeStoreAsync" />
+                    <RadzenButton Text="Clear Store" Icon="delete_sweep" ButtonStyle="ButtonStyle.Danger" Click="@OnClearKnowledgeStore" />
+                </RadzenStack>
+
+                <RadzenTextArea @bind-Value="VM.KnowledgeContent" Rows="4" Placeholder="JSON/XML/Text Inhalt für Vektorisierung..." Style="width:100%;" Name="knowledgeContent" />
+
+                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap">
+                    <RadzenFormField Text="Search Query" Variant="Variant.Outlined">
+                        <ChildContent>
+                            <RadzenTextBox @bind-Value="VM.KnowledgeQuery" Name="knowledgeQuery" Style="width:320px;" />
+                        </ChildContent>
+                    </RadzenFormField>
+
+                    <RadzenFormField Text="Top K" Variant="Variant.Outlined">
+                        <ChildContent>
+                            <RadzenNumeric @bind-Value="VM.KnowledgeTopK" TValue="int" Min="1" Max="10" Step="1" Style="width:90px;" />
+                        </ChildContent>
+                    </RadzenFormField>
+
+                    <RadzenButton Text="Search" Icon="search" ButtonStyle="ButtonStyle.Info" Click="@OnSearchKnowledgeAsync" />
+                </RadzenStack>
+
+                @if (VM.KnowledgeResults.Count > 0)
+                {
+                    <div class="knowledge-results">
+                        @foreach (var result in VM.KnowledgeResults)
+                        {
+                            <div class="knowledge-item">
+                                <div><strong>@result.Entry.Key</strong> <span class="score">(@result.Similarity:F3)</span></div>
+                                <div class="knowledge-preview">@result.Entry.Content</div>
+                            </div>
+                        }
+                    </div>
+                }
+            </RadzenStack>
+        </div>
+    </RadzenCard>
+
+    <RadzenCard>
+        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" JustifyContent="JustifyContent.SpaceBetween" class="rz-mb-2">
+            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
+                <RadzenIcon Icon="chat" />
+                <RadzenText TextStyle="TextStyle.H5" Text="Chat / Generate" class="rz-mb-0" />
+            </RadzenStack>
+
+            @if (VM.MonitoringEnabled && VM.LastGenerationStats != null)
+            {
+                <RadzenText TextStyle="TextStyle.Caption" class="generation-stats-caption" Text="@GenerationStatsSummary" />
+            }
+
+            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
+                <RadzenBadge BadgeStyle="@(VM.IsGenerating ? BadgeStyle.Warning : BadgeStyle.Success)" Text="@(VM.IsGenerating ? "Generating" : "Idle")" />
+                <RadzenBadge BadgeStyle="@(VM.IsolatedGeneration ? BadgeStyle.Secondary : BadgeStyle.Info)" Text="@(VM.IsolatedGeneration ? "Isolated" : "Contextual")" />
+                @if (VM.IsVolatileContext)
+                {
+                    <RadzenBadge BadgeStyle="BadgeStyle.Warning" Text="Volatile" />
+                }
+            </RadzenStack>
+        </RadzenStack>
+
+        <RadzenStack Gap="0.75rem" class="chat-card-stack">
+            <textarea id="promptInput"
+                      @bind="VM.UserInput"
+                      @bind:event="oninput"
+                      rows="4"
+                      placeholder="Prompt eingeben..."
+                      class="prompt-textarea"
+                      disabled="@(!VM.IsLoaded || VM.IsBusy)"></textarea>
+
+            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.75rem" Wrap="FlexWrap.Wrap">
+                <RadzenCheckBox TValue="bool" @bind-Value="VM.IsolatedGeneration" Name="isolatedGeneration" />
+                <RadzenLabel Text="Isolated (stateless)" Component="isolatedGeneration" />
+
+                <RadzenCheckBox TValue="bool" @bind-Value="VM.UseSystemPrompt" Name="useSystemPrompt" />
+                <RadzenLabel Text="System Prompt" Component="useSystemPrompt" />
+
+                <RadzenCheckBox TValue="bool" @bind-Value="VM.AutoSaveEnabled" Name="autoSaveGeneration" />
+                <RadzenLabel Text="Auto Save Context" Component="autoSaveGeneration" />
+            </RadzenStack>
+
+            @if (VM.UseSystemPrompt)
+            {
+                <RadzenTextArea @bind-Value="VM.SystemPrompt" Rows="2" Placeholder="System prompt..." Style="width:100%;" Name="systemPromptInput" />
+            }
+
+            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap">
+                <RadzenButton Text="Browse Images" Icon="image_search" ButtonStyle="ButtonStyle.Light" Click="OnBrowseImagesClick" Disabled="@VM.IsGenerating" />
+                <InputFile id="imagePicker" OnChange="OnImagesSelected" multiple accept="image/*" style="display:none;" />
+
+                <RadzenFormField Text="Max Tokens" Variant="Variant.Outlined">
+                    <ChildContent>
+                        <RadzenNumeric @bind-Value="VM.GenMaxTokens" TValue="int" Min="32" Max="8192" Step="32" Style="width:110px;" />
+                    </ChildContent>
+                </RadzenFormField>
+
+                <RadzenFormField Text="Temperature" Variant="Variant.Outlined">
+                    <ChildContent>
+                        <RadzenNumeric @bind-Value="VM.GenTemperature" TValue="float" Min="0" Max="2" Step="0.1" Style="width:110px;" />
+                    </ChildContent>
+                </RadzenFormField>
+
+                <RadzenFormField Text="Top P" Variant="Variant.Outlined">
+                    <ChildContent>
+                        <RadzenNumeric @bind-Value="VM.GenTopP" TValue="float" Min="0" Max="1" Step="0.05" Style="width:110px;" />
+                    </ChildContent>
+                </RadzenFormField>
+
+                <RadzenButton Text="Generate" Icon="send" ButtonStyle="ButtonStyle.Primary" Disabled="@(!VM.CanSend || !VM.IsLoaded || VM.IsBusy)" Click="@OnGenerateAsync" />
+                <RadzenButton Text="Cancel" Icon="stop" ButtonStyle="ButtonStyle.Warning" Disabled="@(!VM.IsGenerating)" Click="@OnCancelGeneration" />
+                <RadzenButton Text="Reset" Icon="restart_alt" ButtonStyle="ButtonStyle.Light" Disabled="@(VM.IsGenerating)" Click="@OnResetConversationAsync" />
+            </RadzenStack>
+
+            @if (VM.SelectedImagePaths.Count > 0)
+            {
+                <RadzenCard Variant="Variant.Flat" class="image-files-card">
+                    <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" class="rz-mb-1">
+                        <RadzenText TextStyle="TextStyle.Subtitle2" Text="@($"Image Attachments ({VM.SelectedImagePaths.Count})")" />
+                        <div style="flex:1"></div>
+                        <RadzenButton Icon="@(imageAttachmentsExpanded ? "remove" : "add")" Size="ButtonSize.Small" class="collapse-btn" Click="ToggleImageAttachments" />
+                    </RadzenStack>
+
+                    <div class="collapsible @(imageAttachmentsExpanded ? "expanded" : "collapsed")">
+                        <div class="image-chip-wrap collapsible-inner">
+                            @foreach (var image in VM.SelectedImagePaths.ToList())
+                            {
+                                var img = image;
+                                <span class="image-chip">
+                                    <span class="image-chip-label">@VM.GetImageDisplayLabel(img)</span>
+                                    <button type="button" class="image-chip-remove" @onclick="() => VM.RemoveImagePath(img)">✕</button>
+                                </span>
+                            }
+                        </div>
+                    </div>
+                </RadzenCard>
+            }
+
+            <div id="chat-output" class="chat-output">
+                @if (VM.ChatMessages.Count == 0)
+                {
+                    <RadzenText TextStyle="TextStyle.Caption" Text="Noch keine Unterhaltung. Lade ein Modell und starte mit einem Prompt." />
+                }
+                else
+                {
+                    @foreach (var message in VM.ChatMessages)
+                    {
+                        <div class="chat-message @message.Role">
+                            <div class="chat-role">@message.Role.ToUpperInvariant()</div>
+                            <div class="chat-content">@((MarkupString)RenderMarkdown(message.Content ?? string.Empty))</div>
+                        </div>
+                    }
+                }
+            </div>
+        </RadzenStack>
+    </RadzenCard>
 </RadzenStack>
 
 @code {
+    private const string ModelExpandedStorageKey = "home.model.expanded";
+    private const string ContextExpandedStorageKey = "home.context.expanded";
+    private const string KnowledgeExpandedStorageKey = "home.knowledge.expanded";
+    private const string ChatOutputElementId = "chat-output";
 
-    private LlamaModelInfo? SelectedModelInfo =>
-        VM.LlamaModels.FirstOrDefault(m => m.Name == VM.SelectedModelName);
+    private bool? _lastLoadedState;
+    private int _lastChatMessageCount;
+    private bool _panelStateLoaded;
+    private bool imageAttachmentsExpanded = true;
+    private DotNetObjectReference<HomeViewModel>? _vmRef;
 
+    private LlamaModelInfo? SelectedModelInfo => VM.LlamaModels.FirstOrDefault(m => m.Name == VM.SelectedModelName);
     private bool HasMmproj => SelectedModelInfo?.MmprojFilePath != null;
 
     private string MmprojLabel => HasMmproj
         ? "Load multimodal projection (mmproj)"
         : "Multimodal projection – not available for this model";
+
+    private string GenerationStatsSummary
+    {
+        get
+        {
+            var stats = VM.LastGenerationStats;
+            if (stats == null)
+            {
+                return "";
+            }
+
+            string total = stats.TotalGenerationTime.HasValue ? $"{stats.TotalGenerationTime.Value.TotalSeconds:F1}s" : "-";
+            return $"(tok: {stats.TotalTokensGenerated} | tok/s: {stats.TokensPerSecond:F2} | total: {total})";
+        }
+    }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -120,23 +345,253 @@
         {
             VM.NotifyStateChanged = () => InvokeAsync(StateHasChanged);
             await VM.InitializeAsync();
+            await LoadPanelStatesAsync();
+            _panelStateLoaded = true;
+            _lastLoadedState = VM.IsLoaded;
+
+            _vmRef = DotNetObjectReference.Create(VM);
+            await JS.InvokeVoidAsync("sharpestNavMenu.setupPromptEnter", "promptInput", _vmRef);
+            await JS.InvokeVoidAsync("sharpestNavMenu.setupConditionalAutoScroll", ChatOutputElementId, 0.1);
+            await JS.InvokeVoidAsync("sharpestNavMenu.autoScrollIfSticky", ChatOutputElementId);
+            _lastChatMessageCount = VM.ChatMessages.Count;
+
             StateHasChanged();
+            return;
+        }
+
+        if (_panelStateLoaded)
+        {
+            await PersistPanelStatesAsync();
+        }
+
+        if (_lastLoadedState != VM.IsLoaded)
+        {
+            _lastLoadedState = VM.IsLoaded;
+            await PersistPanelStatesAsync();
+        }
+
+        if (VM.ChatMessages.Count != _lastChatMessageCount || VM.IsGenerating)
+        {
+            _lastChatMessageCount = VM.ChatMessages.Count;
+            await JS.InvokeVoidAsync("sharpestNavMenu.autoScrollIfSticky", ChatOutputElementId);
         }
     }
 
     private void OnSelectedModelChanged()
     {
-        // Auto-enable mmproj when the newly selected model has one
         VM.UseMmproj = HasMmproj;
     }
 
     private async Task OnToggleModelAsync()
     {
         await VM.ToggleModelAsync();
+        await PersistPanelStatesAsync();
+    }
+
+    private async Task ToggleModelExpandedAsync()
+    {
+        VM.IsModelPanelExpanded = !VM.IsModelPanelExpanded;
+        await PersistPanelStatesAsync();
+    }
+
+    private async Task ToggleContextExpandedAsync()
+    {
+        VM.IsContextPanelExpanded = !VM.IsContextPanelExpanded;
+        await PersistPanelStatesAsync();
+    }
+
+    private async Task ToggleKnowledgeExpandedAsync()
+    {
+        VM.IsKnowledgePanelExpanded = !VM.IsKnowledgePanelExpanded;
+        await PersistPanelStatesAsync();
+    }
+
+    private async Task OnBrowseImagesClick()
+    {
+        await JS.InvokeVoidAsync("sharpestNavMenu.triggerClick", "imagePicker");
+    }
+
+    private async Task OnImagesSelected(InputFileChangeEventArgs args)
+    {
+        await VM.AddImageUploadsAsync(args.GetMultipleFiles());
+    }
+
+    private void ToggleImageAttachments()
+    {
+        imageAttachmentsExpanded = !imageAttachmentsExpanded;
+    }
+
+    private async Task OnBrowseKnowledgeFilesClick()
+    {
+        await JS.InvokeVoidAsync("sharpestNavMenu.triggerClick", "knowledgeFilePicker");
+    }
+
+    private async Task OnKnowledgeFilesSelected(InputFileChangeEventArgs args)
+    {
+        await VM.AddKnowledgeFromFilesAsync(args.GetMultipleFiles());
+    }
+
+    private async Task LoadPanelStatesAsync()
+    {
+        // Reset panel states on every app restart so defaults apply cleanly
+        await JS.InvokeVoidAsync("localStorage.removeItem", ModelExpandedStorageKey);
+        await JS.InvokeVoidAsync("localStorage.removeItem", ContextExpandedStorageKey);
+        await JS.InvokeVoidAsync("localStorage.removeItem", KnowledgeExpandedStorageKey);
+
+        VM.IsModelPanelExpanded = true;
+        VM.IsContextPanelExpanded = false;
+        VM.IsKnowledgePanelExpanded = false;
+    }
+
+    private async Task PersistPanelStatesAsync()
+    {
+        await JS.InvokeVoidAsync("localStorage.setItem", ModelExpandedStorageKey, VM.IsModelPanelExpanded ? "1" : "0");
+        await JS.InvokeVoidAsync("localStorage.setItem", ContextExpandedStorageKey, VM.IsContextPanelExpanded ? "1" : "0");
+        await JS.InvokeVoidAsync("localStorage.setItem", KnowledgeExpandedStorageKey, VM.IsKnowledgePanelExpanded ? "1" : "0");
+    }
+
+    private async Task<bool> GetStoredBoolAsync(string key, bool defaultValue)
+    {
+        var value = await JS.InvokeAsync<string?>("localStorage.getItem", key);
+        return value switch
+        {
+            "1" => true,
+            "0" => false,
+            _ => defaultValue
+        };
+    }
+
+    private async Task OnKillAllLlamaServerInstancesAsync() => await VM.KillAllLlamaServerExeInstancesAsync();
+    private async Task OnGenerateAsync() => await VM.StartGenerationAsync();
+    private void OnCancelGeneration() => VM.CancelGeneration();
+    private async Task OnResetConversationAsync() => await VM.ResetConversationAsync();
+    private async Task OnSaveContextAsync() => await VM.SaveContextAsync();
+    private async Task OnLoadContextAsync() => await VM.LoadSelectedContextAsync();
+    private async Task OnDeleteContextAsync() => await VM.DeleteSelectedContextAsync();
+    private async Task OnUpsertKnowledgeAsync() => await VM.AddKnowledgeAsync();
+    private async Task OnSearchKnowledgeAsync() => await VM.SearchKnowledgeAsync();
+    private async Task OnSaveKnowledgeStoreAsync() => await VM.SaveKnowledgeStoreAsync();
+    private void OnClearKnowledgeStore() => VM.ClearKnowledgeStore();
+
+    private static string RenderMarkdown(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return string.Empty;
+        }
+
+        var lines = text.Split('\n');
+        var sb = new System.Text.StringBuilder();
+        bool inCodeBlock = false;
+        bool inList = false;
+
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.TrimEnd('\r');
+
+            // Code block toggle
+            if (line.TrimStart().StartsWith("```"))
+            {
+                if (inList) { sb.Append("</ul>"); inList = false; }
+                if (inCodeBlock)
+                {
+                    sb.Append("</code></pre>");
+                    inCodeBlock = false;
+                }
+                else
+                {
+                    sb.Append("<pre class=\"md-code-block\"><code>");
+                    inCodeBlock = true;
+                }
+                continue;
+            }
+
+            if (inCodeBlock)
+            {
+                sb.Append(System.Net.WebUtility.HtmlEncode(line)).Append('\n');
+                continue;
+            }
+
+            // Headers
+            if (line.StartsWith("#### "))
+            {
+                if (inList) { sb.Append("</ul>"); inList = false; }
+                sb.Append("<h6 class=\"md-h\">").Append(InlineMarkdown(line[5..])).Append("</h6>");
+                continue;
+            }
+            if (line.StartsWith("### "))
+            {
+                if (inList) { sb.Append("</ul>"); inList = false; }
+                sb.Append("<h5 class=\"md-h\">").Append(InlineMarkdown(line[4..])).Append("</h5>");
+                continue;
+            }
+            if (line.StartsWith("## "))
+            {
+                if (inList) { sb.Append("</ul>"); inList = false; }
+                sb.Append("<h4 class=\"md-h\">").Append(InlineMarkdown(line[3..])).Append("</h4>");
+                continue;
+            }
+            if (line.StartsWith("# "))
+            {
+                if (inList) { sb.Append("</ul>"); inList = false; }
+                sb.Append("<h4 class=\"md-h\">").Append(InlineMarkdown(line[2..])).Append("</h4>");
+                continue;
+            }
+
+            // Bullet list items
+            if (line.TrimStart().StartsWith("- ") || line.TrimStart().StartsWith("* "))
+            {
+                if (!inList) { sb.Append("<ul class=\"md-list\">"); inList = true; }
+                var itemText = line.TrimStart()[2..];
+                sb.Append("<li>").Append(InlineMarkdown(itemText)).Append("</li>");
+                continue;
+            }
+
+            // Numbered list items
+            if (System.Text.RegularExpressions.Regex.IsMatch(line.TrimStart(), @"^\d+\.\s"))
+            {
+                if (!inList) { sb.Append("<ol class=\"md-list\">"); inList = true; }
+                var match = System.Text.RegularExpressions.Regex.Match(line.TrimStart(), @"^\d+\.\s(.*)");
+                sb.Append("<li>").Append(InlineMarkdown(match.Groups[1].Value)).Append("</li>");
+                continue;
+            }
+
+            if (inList) { sb.Append("</ul>"); inList = false; }
+
+            // Empty line = paragraph break
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                sb.Append("<br/>");
+                continue;
+            }
+
+            // Normal paragraph
+            sb.Append("<p class=\"md-p\">").Append(InlineMarkdown(line)).Append("</p>");
+        }
+
+        if (inList) sb.Append("</ul>");
+        if (inCodeBlock) sb.Append("</code></pre>");
+
+        return sb.ToString();
+    }
+
+    private static string InlineMarkdown(string text)
+    {
+        var encoded = System.Net.WebUtility.HtmlEncode(text);
+
+        // Inline code: `code`
+        encoded = System.Text.RegularExpressions.Regex.Replace(encoded, @"`([^`]+)`", "<code class=\"md-inline-code\">$1</code>");
+        // Bold: **text**
+        encoded = System.Text.RegularExpressions.Regex.Replace(encoded, @"\*\*(.+?)\*\*", "<strong>$1</strong>");
+        // Italic: *text*
+        encoded = System.Text.RegularExpressions.Regex.Replace(encoded, @"\*(.+?)\*", "<em>$1</em>");
+
+        return encoded;
     }
 
     public void Dispose()
     {
         VM.NotifyStateChanged = null;
+        _vmRef?.Dispose();
     }
 }

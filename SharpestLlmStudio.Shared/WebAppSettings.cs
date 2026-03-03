@@ -14,6 +14,7 @@ namespace SharpestLlmStudio.Shared
         public string ServerExecutablePath { get; set; } = "llama-server.exe";
         public string[] ModelDirectories { get; set; } = [];
 
+        public bool KillExistingServerInstancesBeforeLoad { get; set; } = false;
         public int DefaultContextSize { get; set; } = 4096;
         public int DefaultMaxTokens { get; set; } = 2048;
         public double DefaultTemperature { get; set; } = 0.7;

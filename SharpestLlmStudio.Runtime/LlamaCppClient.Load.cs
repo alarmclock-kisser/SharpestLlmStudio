@@ -23,6 +23,15 @@ namespace SharpestLlmStudio.Runtime
 
         public async Task<LlamaModelLoadResult> LoadModelAsync(LlamaModelLoadRequest request, CancellationToken cancellationToken = default)
         {
+            if (this._settings.KillExistingServerInstancesBeforeLoad)
+            {
+                int killed = this.KillAllLlamaServerExeInstances() ?? 0;
+                if (killed > 0)
+                {
+                    await StaticLogger.LogAsync($"[LlamaCpp] Killed {killed} existing llama-server.exe instance(s) before loading new model.");
+                }
+            }
+
             var stopwatch = Stopwatch.StartNew();
 
             try
@@ -44,8 +53,19 @@ namespace SharpestLlmStudio.Runtime
 
                 if (request.UseFlashAttention)
                 {
-                    args += " -fa";
+                    args += " --flash-attn on";
                 }
+
+                // Enable embedding endpoint for knowledge base vectorization
+                // NOTE: --embedding conflicts with multimodal (VL/mmproj) models — only enable when no mmproj is loaded
+                bool hasMmproj = request.IncludeMmproj && !string.IsNullOrEmpty(request.ModelInfo.MmprojFilePath);
+                if (!hasMmproj)
+                {
+                    args += " --embedding";
+                }
+
+                // Enable slot save/restore for context management
+                args += $" --slot-save-path \"{this.ContextDirectory}\"";
 
                 // Prüfen ob Executable existiert
                 var exePath = ResolveExecutablePath(request.ServerExecutablePath);
@@ -254,6 +274,18 @@ namespace SharpestLlmStudio.Runtime
         public void Dispose()
         {
             this.UnloadModel();
+
+            if (this._settings.KillExistingServerInstancesBeforeLoad)
+            {
+                try
+                {
+                    _ = this.KillAllLlamaServerExeInstances();
+                }
+                catch
+                {
+                }
+            }
+
             this._httpClient.Dispose();
         }
 

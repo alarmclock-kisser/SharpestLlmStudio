@@ -1,4 +1,5 @@
 ﻿using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Forms;
 using Microsoft.JSInterop;
 using Microsoft.AspNetCore.Components.Web;
 using System.IO;
@@ -229,6 +230,23 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public bool IsGenerating { get; set; } = false;
 
         public bool CanSend => !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput);
+        public string SystemPrompt { get; set; } = "You are a helpful, concise assistant.";
+
+        public List<LlamaChatMessage> ChatMessages { get; private set; } = [];
+
+        public string ContextSaveName { get; set; } = "session";
+        public string? SelectedContextFilePath { get; set; } = null;
+
+        public string KnowledgeKey { get; set; } = string.Empty;
+        public string KnowledgeContent { get; set; } = string.Empty;
+        public string KnowledgeQuery { get; set; } = string.Empty;
+        public int KnowledgeTopK { get; set; } = 3;
+        public IReadOnlyList<LlamaKnowledgeSearchResult> KnowledgeResults { get; private set; } = [];
+
+        public string? LastActionMessage { get; set; } = null;
+        public bool MonitoringEnabled => this.Settings.EnableMonitoring;
+        public bool HasSavedContextBaseline => !string.IsNullOrWhiteSpace(this.SelectedContextFilePath);
+        public bool IsVolatileContext => !this.HasSavedContextBaseline;
 
         private bool isModelPanelExpanded = true;
         public bool IsModelPanelExpanded
@@ -237,6 +255,28 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             set
             {
                 this.isModelPanelExpanded = value;
+                try { this.NotifyStateChanged?.Invoke(); } catch { }
+            }
+        }
+
+        private bool isContextPanelExpanded = false;
+        public bool IsContextPanelExpanded
+        {
+            get => this.isContextPanelExpanded;
+            set
+            {
+                this.isContextPanelExpanded = value;
+                try { this.NotifyStateChanged?.Invoke(); } catch { }
+            }
+        }
+
+        private bool isKnowledgePanelExpanded = false;
+        public bool IsKnowledgePanelExpanded
+        {
+            get => this.isKnowledgePanelExpanded;
+            set
+            {
+                this.isKnowledgePanelExpanded = value;
                 try { this.NotifyStateChanged?.Invoke(); } catch { }
             }
         }
@@ -300,7 +340,6 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         [JSInvokable]
         public async Task OnEnterPressed()
         {
-            // Called from JS when Enter (without Shift) is pressed
             if (this.IsGenerating)
             {
                 return;
@@ -311,7 +350,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 return;
             }
 
-            // await this.StartGenerationAsync();
+            await this.StartGenerationAsync();
         }
 
 
@@ -323,6 +362,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         private async Task InitializeInternalAsync()
         {
             await this.RefreshAsync();
+            await this.RefreshContextAsync();
+            this.SyncChatMessagesFromClient();
 
             if (this.AutoRefreshEnabled)
             {
@@ -334,18 +375,33 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         {
             try
             {
-                // this.ContextFiles = await this.Api.GetContextFilesAsync();
+                var contextFiles = await this.Client.GetSavedContextFilesAsync();
+                this.ContextFiles = contextFiles.ToList();
+                if (!string.IsNullOrWhiteSpace(this.SelectedContextFilePath) && !this.ContextFiles.Contains(this.SelectedContextFilePath))
+                {
+                    this.SelectedContextFilePath = null;
+                }
+
+                if (string.IsNullOrWhiteSpace(this.SelectedContextFilePath) && this.ContextFiles.Count > 0)
+                {
+                    this.SelectedContextFilePath = this.ContextFiles.First();
+                }
+
+                this.IsCurrentContextSaved = !string.IsNullOrWhiteSpace(this.SelectedContextFilePath);
             }
             catch
             {
                 this.ContextFiles = [];
+                this.IsCurrentContextSaved = false;
             }
         }
 
         public async Task ResetConversationAsync()
         {
-            // await this.Client.ResetContextAsync(this.ContextSize);
+            this.Client.ResetConversation();
             this.GeneratedOutput = string.Empty;
+            this.ChatMessages = [];
+            this.IsCurrentContextSaved = false;
             await this.RefreshContextAsync();
             try { this.NotifyStateChanged?.Invoke(); } catch { }
         }
@@ -435,10 +491,160 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             try { this.NotifyStateChanged?.Invoke(); } catch { }
         }
 
-        /*public async Task StartGenerationAsync()
+        public async Task AddImageUploadsAsync(IEnumerable<IBrowserFile> files, CancellationToken cancellationToken = default)
         {
-            await this.StartGenerationFromPromptAsync(this.UserInput);
-        }*/
+            if (files == null)
+            {
+                return;
+            }
+
+            foreach (var file in files)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                try
+                {
+                    using var stream = file.OpenReadStream(25 * 1024 * 1024, cancellationToken);
+                    using var ms = new MemoryStream();
+                    await stream.CopyToAsync(ms, cancellationToken);
+
+                    string dataUrl = $"data:{(string.IsNullOrWhiteSpace(file.ContentType) ? "image/jpeg" : file.ContentType)};base64,{Convert.ToBase64String(ms.ToArray())}";
+                    if (!this.SelectedImagePaths.Contains(dataUrl, StringComparer.Ordinal))
+                    {
+                        int width = 0;
+                        int height = 0;
+                        try
+                        {
+                            var dimensions = await this.Js.InvokeAsync<int[]>("sharpestNavMenu.getImageDimensionsFromDataUrl", dataUrl);
+                            if (dimensions is { Length: >= 2 })
+                            {
+                                width = Math.Max(0, dimensions[0]);
+                                height = Math.Max(0, dimensions[1]);
+                            }
+                        }
+                        catch
+                        {
+                        }
+
+                        this.SelectedImagePaths.Add(dataUrl);
+                        this.loadedImageMetadata[dataUrl] = new LoadedImageMetadata
+                        {
+                            FileName = file.Name,
+                            Width = width,
+                            Height = height,
+                            FileSizeBytes = (long) file.Size
+                        };
+                    }
+                }
+                catch (Exception ex)
+                {
+                    await StaticLogger.LogAsync($"[HomeViewModel] Could not load uploaded image '{file.Name}': {ex.Message}");
+                }
+            }
+
+            this.IsImagePathsExpanded = this.SelectedImagePaths.Count > 0;
+            this.RequestUiRefresh();
+        }
+
+        public async Task StartGenerationAsync()
+        {
+            if (this.IsGenerating || !this.IsLoaded || string.IsNullOrWhiteSpace(this.UserInput))
+            {
+                return;
+            }
+
+            this.generationCts?.Cancel();
+            this.generationCts?.Dispose();
+            this.generationCts = new CancellationTokenSource();
+
+            string prompt = this.UserInput.Trim();
+            string assistantText = string.Empty;
+
+            this.IsGenerating = true;
+            this.GeneratedOutput = string.Empty;
+            this.LastLoadError = null;
+
+            var generationStats = new GenerationStats
+            {
+                GenerationStarted = DateTime.UtcNow,
+                TotalContextTokens = this.ContextSize
+            };
+            this.LastGenerationStats = generationStats;
+
+            if (!this.IsolatedGeneration)
+            {
+                this.ChatMessages.Add(new LlamaChatMessage { Role = "user", Content = prompt, CreatedAtUtc = DateTime.UtcNow });
+            }
+
+            var assistantMessage = new LlamaChatMessage { Role = "assistant", Content = string.Empty, CreatedAtUtc = DateTime.UtcNow };
+            this.ChatMessages.Add(assistantMessage);
+            this.RequestUiRefresh();
+
+            try
+            {
+                LlamaGenerationRequest request = new()
+                {
+                    Prompt = prompt,
+                    Images = this.SelectedImagePaths.ToArray(),
+                    Isolated = this.IsolatedGeneration,
+                    PersistConversation = !this.IsolatedGeneration,
+                    IncludeConversationHistory = !this.IsolatedGeneration,
+                    MaxTokens = this.GenMaxTokens,
+                    Temperature = this.GenTemperature,
+                    TopP = this.GenTopP,
+                    Stream = true,
+                    SystemPrompt = this.UseSystemPrompt ? this.SystemPrompt : null
+                };
+
+                await foreach (var chunk in this.Client.GenerateAsync(request, this.generationCts.Token))
+                {
+                    assistantText += chunk;
+                    this.GeneratedOutput = assistantText;
+                    assistantMessage.Content = assistantText;
+                    this.LastGenerationStats = this.Client.GetLastGenerationStatsSnapshot();
+                    this.RequestUiRefresh();
+                }
+
+                this.UserInput = string.Empty;
+                this.LastGenerationStats = this.Client.GetLastGenerationStatsSnapshot();
+
+                if (this.AutoSaveEnabled && !this.IsolatedGeneration && this.HasSavedContextBaseline)
+                {
+                    string saveName = Path.GetFileNameWithoutExtension(this.SelectedContextFilePath) ?? this.ContextSaveName;
+                    var saveResult = await this.Client.SaveContextAsync(saveName);
+                    this.IsCurrentContextSaved = saveResult.Success;
+                    if (saveResult.Success)
+                    {
+                        this.SelectedContextFilePath = saveResult.FilePath;
+                        await this.RefreshContextAsync();
+                    }
+                }
+                else if (!this.IsolatedGeneration)
+                {
+                    this.IsCurrentContextSaved = false;
+                }
+
+                this.LastActionMessage = "Generation finished.";
+            }
+            catch (OperationCanceledException)
+            {
+                assistantMessage.Content = string.IsNullOrWhiteSpace(assistantText) ? "[Generation canceled]" : assistantText;
+                this.LastGenerationStats = this.Client.GetLastGenerationStatsSnapshot();
+                this.LastActionMessage = "Generation canceled.";
+            }
+            catch (Exception ex)
+            {
+                this.LastLoadError = ex.Message;
+                assistantMessage.Content = string.IsNullOrWhiteSpace(assistantText) ? $"[Error] {ex.Message}" : assistantText;
+                this.LastGenerationStats = this.Client.GetLastGenerationStatsSnapshot();
+                await StaticLogger.LogAsync(ex, "[HomeViewModel] Error while generating response");
+            }
+            finally
+            {
+                this.IsGenerating = false;
+                this.RequestUiRefresh();
+            }
+        }
 
         public void CancelGeneration()
         {
@@ -493,17 +699,25 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         public string GetImageDisplayLabel(string imagePath)
         {
-            if (!TryGetImageDisplayInfo(imagePath, out var info))
+            if (this.loadedImageMetadata.TryGetValue(imagePath, out var meta))
             {
-                return Path.GetFileName(imagePath);
+                string sizeText = FormatSize(meta.FileSizeBytes);
+                return meta.Width > 0 && meta.Height > 0
+                    ? $"{meta.FileName} [{meta.Width}x{meta.Height}] ({sizeText})"
+                    : $"{meta.FileName} ({sizeText})";
             }
 
-            return info.Label;
+            if (imagePath.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
+            {
+                return "uploaded-image";
+            }
+
+            return Path.GetFileName(imagePath);
         }
 
         public string GetImageDisplayStyle(string imagePath)
         {
-            if (!TryGetImageDisplayInfo(imagePath, out var info))
+            if (!this.TryGetImageDisplayInfo(imagePath, out var info))
             {
                 return "color:#1B5E20;";
             }
@@ -645,6 +859,172 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             };
         }
 
+        public async Task SaveContextAsync()
+        {
+            var result = await this.Client.SaveContextAsync(this.ContextSaveName);
+            if (result.Success)
+            {
+                this.SelectedContextFilePath = result.FilePath;
+                this.IsCurrentContextSaved = true;
+            }
+
+            this.LastActionMessage = result.Success
+                ? $"Context saved: {Path.GetFileName(result.FilePath)}"
+                : $"Context save failed: {result.ErrorMessage}";
+
+            await this.RefreshContextAsync();
+            this.RequestUiRefresh();
+        }
+
+        public async Task LoadSelectedContextAsync()
+        {
+            if (string.IsNullOrWhiteSpace(this.SelectedContextFilePath))
+            {
+                return;
+            }
+
+            bool success = await this.Client.LoadContextAsync(this.SelectedContextFilePath);
+            this.LastActionMessage = success
+                ? $"Context loaded: {Path.GetFileName(this.SelectedContextFilePath)}"
+                : $"Context load failed: {Path.GetFileName(this.SelectedContextFilePath)}";
+
+            this.IsCurrentContextSaved = success;
+
+            this.SyncChatMessagesFromClient();
+            this.RequestUiRefresh();
+        }
+
+        public async Task DeleteSelectedContextAsync()
+        {
+            if (string.IsNullOrWhiteSpace(this.SelectedContextFilePath))
+            {
+                return;
+            }
+
+            bool success = await this.Client.DeleteContextAsync(this.SelectedContextFilePath);
+            this.LastActionMessage = success
+                ? $"Context deleted: {Path.GetFileName(this.SelectedContextFilePath)}"
+                : $"Context delete failed: {Path.GetFileName(this.SelectedContextFilePath)}";
+
+            if (success)
+            {
+                this.SelectedContextFilePath = null;
+                this.IsCurrentContextSaved = false;
+            }
+
+            await this.RefreshContextAsync();
+            this.RequestUiRefresh();
+        }
+
+        public async Task AddKnowledgeAsync()
+        {
+            if (string.IsNullOrWhiteSpace(this.KnowledgeKey) || string.IsNullOrWhiteSpace(this.KnowledgeContent))
+            {
+                return;
+            }
+
+            _ = await this.Client.UpsertKnowledgeAsync(this.KnowledgeKey.Trim(), this.KnowledgeContent.Trim());
+            this.LastActionMessage = $"Knowledge upserted: {this.KnowledgeKey.Trim()}";
+            this.KnowledgeKey = string.Empty;
+            this.KnowledgeContent = string.Empty;
+            this.RequestUiRefresh();
+        }
+
+        public async Task AddKnowledgeFromFilesAsync(IEnumerable<IBrowserFile> files, CancellationToken cancellationToken = default)
+        {
+            if (files == null)
+            {
+                return;
+            }
+
+            int added = 0;
+            foreach (var file in files)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                try
+                {
+                    using var stream = file.OpenReadStream(50 * 1024 * 1024, cancellationToken);
+                    using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                    string content = await reader.ReadToEndAsync(cancellationToken);
+                    if (string.IsNullOrWhiteSpace(content))
+                    {
+                        continue;
+                    }
+
+                    string key = Path.GetFileName(file.Name);
+                    await this.Client.UpsertKnowledgeAsync(key, content, file.Name, cancellationToken);
+                    added++;
+                }
+                catch (Exception ex)
+                {
+                    await StaticLogger.LogAsync($"[HomeViewModel] Could not import knowledge file '{file.Name}': {ex.Message}");
+                }
+            }
+
+            this.LastActionMessage = added > 0
+                ? $"Imported {added} knowledge file(s)."
+                : "No knowledge files were imported.";
+            this.RequestUiRefresh();
+        }
+
+        public async Task SearchKnowledgeAsync()
+        {
+            if (string.IsNullOrWhiteSpace(this.KnowledgeQuery))
+            {
+                this.KnowledgeResults = [];
+                this.RequestUiRefresh();
+                return;
+            }
+
+            this.KnowledgeResults = await this.Client.SearchKnowledgeAsync(this.KnowledgeQuery.Trim(), this.KnowledgeTopK);
+            this.LastActionMessage = this.KnowledgeResults.Count == 0
+                ? "No matching knowledge entries found."
+                : $"Found {this.KnowledgeResults.Count} matching knowledge entries.";
+
+            this.RequestUiRefresh();
+        }
+
+        public async Task SaveKnowledgeStoreAsync()
+        {
+            string filePath = await this.Client.SaveKnowledgeStoreAsync();
+            this.LastActionMessage = $"Knowledge store saved: {Path.GetFileName(filePath)}";
+            this.RequestUiRefresh();
+        }
+
+        public void ClearKnowledgeStore()
+        {
+            this.Client.ClearKnowledgeStore();
+            this.KnowledgeResults = [];
+            this.LastActionMessage = "Knowledge store cleared.";
+            this.RequestUiRefresh();
+        }
+
+        public Task KillAllLlamaServerExeInstancesAsync()
+        {
+            int? killed = this.Client.KillAllLlamaServerExeInstances();
+            this.LastActionMessage = killed.HasValue
+                ? $"Killed {killed.Value} llama-server instance(s)."
+                : "Failed to kill llama-server instances.";
+            this.RequestUiRefresh();
+            return Task.CompletedTask;
+        }
+
+        private void SyncChatMessagesFromClient()
+        {
+            this.ChatMessages = this.Client.GetConversationSnapshot().ToList();
+        }
+
+        private static int CountRoughTokens(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return 0;
+            }
+
+            return text.Split([' ', '\n', '\r', '\t'], StringSplitOptions.RemoveEmptyEntries).Length;
+        }
+
         private sealed class LoadedImageMetadata
         {
             public string FileName { get; init; } = string.Empty;
@@ -733,8 +1113,18 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                         this.ModelLoadingTimeString = $"{sw.Elapsed.TotalSeconds:F3} sec. elapsed loading.";
                         this.IsLoaded = true;
                         this.LoadedModel = modelToLoad;
-                        this.IsModelPanelExpanded = false;
+                        this.IsModelPanelExpanded = true;
                         await StaticLogger.LogAsync($"[Blazor] Model loaded successfully in {sw.Elapsed.TotalSeconds:F3}s — API at {response.BaseApiUrl}");
+
+                        _ = Task.Run(async () =>
+                        {
+                            await Task.Delay(3000);
+                            if (this.IsLoaded)
+                            {
+                                this.IsModelPanelExpanded = false;
+                                this.RequestUiRefresh();
+                            }
+                        });
                     }
                     else
                     {
@@ -778,7 +1168,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         {
             try
             {
-                // this.LastHardwareStats = await this.Client.GetHardwareStatisticsAsync();
+                this.LastHardwareStats = await this.Client.GetCurrentHardwareStatisticsAsync();
 
                 if (this.LastHardwareStats?.CpuStats != null)
                 {
