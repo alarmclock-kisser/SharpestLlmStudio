@@ -10,9 +10,7 @@ namespace SharpestLlmStudio.Runtime
     {
         public readonly GpuMonitor? GPUMonitor = null;
 
-
         public List<string> ModelDirectories { get; set; } = [];
-
         public List<LlamaModelInfo> Models { get; set; } = [];
 
 
