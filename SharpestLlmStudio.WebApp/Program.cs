@@ -1,8 +1,7 @@
-
-
-using SharpestLlmStudio.Monitoring;
+using Radzen;
 using SharpestLlmStudio.Runtime;
 using SharpestLlmStudio.Shared;
+using SharpestLlmStudio.WebApp.Components;
 using SharpestLlmStudio.WebApp.ViewModels;
 
 namespace SharpestLlmStudio.WebApp
@@ -30,7 +29,7 @@ namespace SharpestLlmStudio.WebApp
             });
 
             // StaticLogger init
-            StaticLogger.InitializeLogFiles(webAppSettings.LogDirectory, webAppSettings.CreateLogFile, webAppSettings.MaxPreviousLogFiles);
+            StaticLogger.InitializeLogFiles(string.IsNullOrEmpty(webAppSettings.LogDirectory) ? Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory) : webAppSettings.LogDirectory, webAppSettings.CreateLogFile, webAppSettings.MaxPreviousLogFiles);
             StaticLogger.SetUiContext(SynchronizationContext.Current ?? new SynchronizationContext());
 
             // Optional singleton GpuMonitor
@@ -41,7 +40,8 @@ namespace SharpestLlmStudio.WebApp
 
             // ApiClient + WebAppSettings
             builder.Services.AddSingleton(webAppSettings);
-            builder.Services.AddSingleton<LlamaCppClient>(provider => new LlamaCppClient(webAppSettings));
+            builder.Services.AddSingleton<LlamaCppClient>(provider =>
+                new LlamaCppClient(webAppSettings, provider.GetService<GpuMonitor>()));
 
             // HTTPS-Umleitung und HSTS aktivieren
             builder.Services.AddHttpsRedirection(options =>
@@ -65,9 +65,9 @@ namespace SharpestLlmStudio.WebApp
                 options.HeaderName = "X-CSRF-TOKEN";
             });
 
-            builder.Services.AddRazorPages();
-            builder.Services.AddServerSideBlazor();
-            builder.Services.AddSignalR();
+            builder.Services.AddRazorComponents()
+                .AddInteractiveServerComponents();
+            builder.Services.AddRadzenComponents();
             builder.Services.AddScoped<HomeViewModel>();
             // builder.Services.AddScoped<ContextViewModel>();
 
@@ -95,8 +95,8 @@ namespace SharpestLlmStudio.WebApp
             app.UseAuthorization();
 
             // Blazor Server-Endpunkte
-            app.MapBlazorHub();
-            app.MapFallbackToPage("/_Host");
+            app.MapRazorComponents<App>()
+                .AddInteractiveServerRenderMode();
 
             app.Run();
         }

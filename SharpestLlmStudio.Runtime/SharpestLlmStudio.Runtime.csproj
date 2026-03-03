@@ -7,6 +7,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\SharpestLlmStudio.Monitoring\SharpestLlmStudio.Monitoring.csproj" />
     <ProjectReference Include="..\SharpestLlmStudio.Shared\SharpestLlmStudio.Shared.csproj" />
   </ItemGroup>
 

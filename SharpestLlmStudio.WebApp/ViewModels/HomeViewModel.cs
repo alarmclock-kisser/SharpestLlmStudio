@@ -9,7 +9,7 @@ using SharpestLlmStudio.Runtime;
 
 namespace SharpestLlmStudio.WebApp.ViewModels
 {
-    public class HomeViewModel
+    public class HomeViewModel : IDisposable
     {
         // Component can set this to allow the ViewModel to request UI re-render
         public Action? NotifyStateChanged { get; set; }
@@ -31,6 +31,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public bool ForceUnload { get; set; } = true;
         public LlamaModelInfo? LoadedModel { get; set; } = null;
         public int ContextSize { get; set; } = 1024;
+        public bool UseMmproj { get; set; } = true;
+        public bool UseFlashAttention { get; set; } = true;
         public bool UseSystemPrompt { get; set; } = true;
         public bool IsolatedGeneration { get; set; } = false;
         public bool AutoSaveEnabled { get; set; } = true;
@@ -43,6 +45,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
 
         public string ModelLoadingTimeString { get; set; } = "No model loaded yet.";
+        public string? LastLoadError { get; set; } = null;
         public bool IsLoaded { get; set; } = false;
         public bool IsBusy { get; set; } = false;
         public bool IsImagePathsExpanded { get; set; } = false;
@@ -263,12 +266,6 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.Client = ApiClient;
             this.Js = js;
             this.Settings = webAppSettings;
-
-            // start auto-refresh with defaults
-            if (this.AutoRefreshEnabled)
-            {
-                this.StartAutoRefresh();
-            }
         }
 
         private void StartAutoRefresh()
@@ -326,6 +323,11 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         private async Task InitializeInternalAsync()
         {
             await this.RefreshAsync();
+
+            if (this.AutoRefreshEnabled)
+            {
+                this.StartAutoRefresh();
+            }
         }
 
         public async Task RefreshContextAsync()
@@ -658,6 +660,12 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             try { this.NotifyStateChanged?.Invoke(); } catch { }
         }
 
+        public void Dispose()
+        {
+            this.autoRefreshTimer?.Dispose();
+            this.autoRefreshTimer = null;
+        }
+
 
 
         
@@ -670,12 +678,21 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
 
             this.IsBusy = true;
+            this.LastLoadError = null;
+            this.RequestUiRefresh();
+
             try
             {
                 if (this.IsLoaded)
                 {
                     // Unload
-                    
+                    await StaticLogger.LogAsync("[Blazor] Unloading model...");
+                    this.Client.UnloadModel();
+                    this.IsLoaded = false;
+                    this.LoadedModel = null;
+                    this.ModelLoadingTimeString = "Model unloaded.";
+                    this.IsModelPanelExpanded = true;
+                    await StaticLogger.LogAsync("[Blazor] Model unloaded successfully.");
                 }
                 else
                 {
@@ -683,38 +700,65 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     LlamaModelInfo? modelToLoad = this.LlamaModels.FirstOrDefault(m => m.Name.Equals(this.SelectedModelName, StringComparison.OrdinalIgnoreCase));
                     if (modelToLoad == null)
                     {
-                        throw new Exception("Selected model not found");
+                        this.LastLoadError = $"Model '{this.SelectedModelName}' not found in model list.";
+                        await StaticLogger.LogAsync($"[Blazor] {this.LastLoadError}");
+                        return;
                     }
 
                     LlamaModelLoadRequest loadRequest = new()
                     {
                         ModelInfo = modelToLoad,
                         ServerExecutablePath = this.Settings.ServerExecutablePath,
+                        ContextSize = this.ContextSize,
+                        UseFlashAttention = this.UseFlashAttention,
+                        IncludeMmproj = this.UseMmproj,
                     };
+
+                    await StaticLogger.LogAsync($"[Blazor] Loading model '{modelToLoad.Name}'...");
+                    await StaticLogger.LogAsync($"[Blazor]   Executable : {loadRequest.ServerExecutablePath}");
+                    await StaticLogger.LogAsync($"[Blazor]   ModelFile  : {modelToLoad.ModelFilePath}");
+                    await StaticLogger.LogAsync($"[Blazor]   Mmproj     : {(loadRequest.IncludeMmproj ? modelToLoad.MmprojFilePath ?? "(none)" : "(disabled)")}");
+                    await StaticLogger.LogAsync($"[Blazor]   Context    : {loadRequest.ContextSize}  FlashAttn: {loadRequest.UseFlashAttention}");
+                    await StaticLogger.LogAsync($"[Blazor]   Endpoint   : http://{loadRequest.Host}:{loadRequest.Port}");
+
+                    this.ModelLoadingTimeString = "Loading model…";
+                    this.RequestUiRefresh();
+
                     Stopwatch sw = Stopwatch.StartNew();
-
                     LlamaModelLoadResult response = await this.Client.LoadModelAsync(loadRequest);
-
                     sw.Stop();
-                    this.ModelLoadingTimeString = sw.Elapsed.TotalSeconds.ToString("F3") + " sec. elapsed loading.";
-                    this.IsLoaded = response.Success;
-                    this.LoadedModel = response.Success ? modelToLoad : null;
 
-                    // Collapse model panel if load succeeded
-                    if (this.IsLoaded)
+                    if (response.Success)
                     {
+                        this.ModelLoadingTimeString = $"{sw.Elapsed.TotalSeconds:F3} sec. elapsed loading.";
+                        this.IsLoaded = true;
+                        this.LoadedModel = modelToLoad;
                         this.IsModelPanelExpanded = false;
+                        await StaticLogger.LogAsync($"[Blazor] Model loaded successfully in {sw.Elapsed.TotalSeconds:F3}s — API at {response.BaseApiUrl}");
+                    }
+                    else
+                    {
+                        this.ModelLoadingTimeString = $"Load failed after {sw.Elapsed.TotalSeconds:F3} sec.";
+                        this.LastLoadError = response.ErrorMessage ?? "Unknown error during model load.";
+                        this.IsLoaded = false;
+                        this.LoadedModel = null;
+                        await StaticLogger.LogAsync($"[Blazor] Model load FAILED after {sw.Elapsed.TotalSeconds:F3}s: {this.LastLoadError}");
                     }
                 }
             }
             catch (Exception ex)
             {
-                await StaticLogger.LogAsync("[Blazor] Error during model load/unload: " + ex.Message);
+                this.LastLoadError = ex.Message;
+                this.ModelLoadingTimeString = "Load failed.";
+                await StaticLogger.LogAsync("[Blazor] Exception during model load/unload: " + ex.Message);
                 await StaticLogger.LogAsync(ex);
             }
-
-            this.IsBusy = false;
-            await this.RefreshAsync();
+            finally
+            {
+                this.IsBusy = false;
+                await this.RefreshAsync();
+                this.RequestUiRefresh();
+            }
         }
 
 

@@ -96,9 +96,12 @@ namespace SharpestLlmStudio.Shared
         // Context Size (-c). Wie viele Token das Modell sich merken kann.
         public int ContextSize { get; set; } = 4096;
 
-        // Weitere optionale Server-Parameter für später (z.B. Flash Attention)
-        public bool UseFlashAttention { get; set; } = true;
-    }
+        // Multimodal Projection mitladen?
+            public bool IncludeMmproj { get; set; } = true;
+
+            // Weitere optionale Server-Parameter für später (z.B. Flash Attention)
+            public bool UseFlashAttention { get; set; } = true;
+        }
 
     public class LlamaModelLoadResult
     {

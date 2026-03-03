@@ -1,19 +1,23 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text;
+using SharpestLlmStudio.Monitoring;
 using SharpestLlmStudio.Shared;
 
 namespace SharpestLlmStudio.Runtime
 {
     public partial class LlamaCppClient
     {
+        public readonly GpuMonitor? GPUMonitor = null;
+
+
         public List<string> ModelDirectories { get; set; } = [];
 
         public List<LlamaModelInfo> Models { get; set; } = [];
 
 
 
-        public LlamaCppClient(WebAppSettings settings)
+        public LlamaCppClient(WebAppSettings settings, GpuMonitor? gpuMonitor = null)
         {
             this.GetModels(settings.ModelDirectories?.ToArray());
 

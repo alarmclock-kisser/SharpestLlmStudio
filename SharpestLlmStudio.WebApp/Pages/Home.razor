@@ -1,2 +1,142 @@
 ﻿@page "/"
 @page "/home"
+@rendermode InteractiveServer
+
+@using SharpestLlmStudio.Shared
+@using SharpestLlmStudio.WebApp.ViewModels
+
+@inject HomeViewModel VM
+@implements IDisposable
+
+<PageTitle>Home – SharpestLlmStudio</PageTitle>
+
+<RadzenStack Gap="1rem">
+
+    @* ───────── Model Management Card ───────── *@
+    <RadzenCard>
+        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" class="rz-mb-4">
+            <RadzenIcon Icon="memory" />
+            <RadzenText TextStyle="TextStyle.H5" Text="Model Management" class="rz-mb-0" />
+            <RadzenBadge BadgeStyle="@(VM.IsLoaded ? BadgeStyle.Success : BadgeStyle.Secondary)"
+                         Text="@(VM.IsLoaded ? "Loaded" : "Not Loaded")" />
+        </RadzenStack>
+
+        <RadzenStack Gap="1rem">
+
+            @* Model dropdown *@
+            <RadzenFormField Text="Model" Variant="Variant.Outlined" Style="width:100%;">
+                <ChildContent>
+                    <RadzenDropDown @bind-Value="VM.SelectedModelName"
+                                    Data="@VM.LlamaModels"
+                                    TextProperty="Name"
+                                    ValueProperty="Name"
+                                    Placeholder="Select a model…"
+                                    Disabled="@(VM.IsLoaded || VM.IsBusy)"
+                                    Style="width:100%;"
+                                    Change="@OnSelectedModelChanged" />
+                </ChildContent>
+            </RadzenFormField>
+
+            @* Mmproj checkbox *@
+            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
+                <RadzenCheckBox @bind-Value="VM.UseMmproj"
+                                Disabled="@(!HasMmproj || VM.IsLoaded || VM.IsBusy)"
+                                TValue="bool" />
+                <RadzenLabel Text="@MmprojLabel" Style="cursor:pointer;" />
+            </RadzenStack>
+
+            @* Context size *@
+            <RadzenFormField Text="Context Size" Variant="Variant.Outlined" Style="width:100%;">
+                <ChildContent>
+                    <RadzenNumeric @bind-Value="VM.ContextSize"
+                                   Min="128" Max="131072" Step="256"
+                                   Disabled="@(VM.IsLoaded || VM.IsBusy)"
+                                   TValue="int" />
+                </ChildContent>
+            </RadzenFormField>
+
+            @* Flash Attention checkbox *@
+            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
+                <RadzenCheckBox @bind-Value="VM.UseFlashAttention"
+                                Disabled="@(VM.IsLoaded || VM.IsBusy)"
+                                TValue="bool" />
+                <RadzenLabel Text="Flash Attention" Style="cursor:pointer;" />
+            </RadzenStack>
+
+            @* Load / Unload button *@
+            <RadzenButton Text="@(VM.IsLoaded ? "Unload Model" : "Load Model")"
+                          Icon="@(VM.IsLoaded ? "eject" : "download")"
+                          ButtonStyle="@(VM.IsLoaded ? ButtonStyle.Danger : ButtonStyle.Primary)"
+                          IsBusy="@VM.IsBusy"
+                          Disabled="@(VM.IsBusy || (!VM.IsLoaded && string.IsNullOrEmpty(VM.SelectedModelName)))"
+                          Click="@OnToggleModelAsync"
+                          Style="width:fit-content;" />
+
+            @* Status text *@
+            <RadzenText TextStyle="TextStyle.Body2" class="rz-color-on-surface-variant">
+                @VM.ModelLoadingTimeString
+            </RadzenText>
+
+            @* Error banner *@
+            @if (!string.IsNullOrEmpty(VM.LastLoadError))
+            {
+                <RadzenAlert AlertStyle="AlertStyle.Danger" Shade="Shade.Lighter" AllowClose="true" ShowIcon="true"
+                             Close="@(() => VM.LastLoadError = null)">
+                    @VM.LastLoadError
+                </RadzenAlert>
+            }
+
+            @* Loaded-model banner *@
+            @if (VM.LoadedModel != null)
+            {
+                <RadzenAlert AlertStyle="AlertStyle.Success" Shade="Shade.Lighter" AllowClose="false" ShowIcon="true">
+                    <strong>Loaded:</strong> @VM.LoadedModel.Name
+                    @if (VM.UseMmproj && !string.IsNullOrEmpty(VM.LoadedModel.MmprojFilePath))
+                    {
+                        <text> — Multimodal projection active</text>
+                    }
+                </RadzenAlert>
+            }
+
+        </RadzenStack>
+    </RadzenCard>
+
+</RadzenStack>
+
+@code {
+
+    private LlamaModelInfo? SelectedModelInfo =>
+        VM.LlamaModels.FirstOrDefault(m => m.Name == VM.SelectedModelName);
+
+    private bool HasMmproj => SelectedModelInfo?.MmprojFilePath != null;
+
+    private string MmprojLabel => HasMmproj
+        ? "Load multimodal projection (mmproj)"
+        : "Multimodal projection – not available for this model";
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            VM.NotifyStateChanged = () => InvokeAsync(StateHasChanged);
+            await VM.InitializeAsync();
+            StateHasChanged();
+        }
+    }
+
+    private void OnSelectedModelChanged()
+    {
+        // Auto-enable mmproj when the newly selected model has one
+        VM.UseMmproj = HasMmproj;
+    }
+
+    private async Task OnToggleModelAsync()
+    {
+        await VM.ToggleModelAsync();
+    }
+
+    public void Dispose()
+    {
+        VM.NotifyStateChanged = null;
+    }
+}
