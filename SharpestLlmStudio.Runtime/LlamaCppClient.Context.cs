@@ -188,6 +188,8 @@ namespace SharpestLlmStudio.Runtime
                 throw new InvalidOperationException("llama.cpp server is not running. Load a model first.");
             }
 
+            using var activityScope = this.BeginServerActivityScope();
+
             var url = $"{this.CurrentBaseUrl}/slots/{slotId}?action={Uri.EscapeDataString(action)}";
             string? slotFilename = !string.IsNullOrWhiteSpace(filePath) ? Path.GetFileName(filePath) : null;
             HttpResponseMessage response;
@@ -214,6 +216,7 @@ namespace SharpestLlmStudio.Runtime
             }
 
             response.EnsureSuccessStatusCode();
+            this.TouchServerActivity();
         }
 
         private string ResolveContextPath(string contextPathOrName)

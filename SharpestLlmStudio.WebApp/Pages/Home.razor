@@ -90,7 +90,7 @@
                                   Disabled="@(VM.IsBusy || (!VM.IsLoaded && string.IsNullOrEmpty(VM.SelectedModelName)))"
                                   Click="@OnToggleModelAsync" />
 
-                    <RadzenButton Text="Kill all llama-server.exe"
+                    <RadzenButton Text="Kill 'llama-server.exe'"
                                   Icon="warning"
                                   ButtonStyle="ButtonStyle.Danger"
                                   Disabled="@VM.IsBusy"

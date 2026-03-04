@@ -68,7 +68,15 @@ namespace SharpestLlmStudio.Runtime
 
                 if (request.UseFlashAttention)
                 {
-                    args += " --flash-attn on";
+                    // Ternary quantized models (TQ1_0, TQ2_0) are incompatible with Flash Attention in CUDA
+                    if (request.ModelInfo.IsTernaryQuantized)
+                    {
+                        await StaticLogger.LogAsync($"[LlamaCpp] Flash Attention disabled automatically: model '{request.ModelInfo.Name}' uses ternary quantization (TQ) which is incompatible with --flash-attn.");
+                    }
+                    else
+                    {
+                        args += " --flash-attn on";
+                    }
                 }
 
                 // Enable embedding endpoint for knowledge base vectorization
@@ -168,6 +176,8 @@ namespace SharpestLlmStudio.Runtime
                 if (isReady)
                 {
                     this.CurrentContextSize = request.ContextSize;
+                    this.TouchServerActivity();
+                    this.StartIdleMonitorIfEnabled();
                     await StaticLogger.LogAsync($"[LlamaCpp] Server ready at {this._currentBaseUrl} after {stopwatch.Elapsed.TotalSeconds:F1}s");
                     return new LlamaModelLoadResult
                     {
@@ -230,6 +240,7 @@ namespace SharpestLlmStudio.Runtime
 
                 this._currentBaseUrl = baseUrl;
                 this.CurrentContextSize = contextSize;
+                this.TouchServerActivity();
                 string? activeModelId = await this.TryGetActiveModelIdAsync(baseUrl, cts.Token);
 
                 await StaticLogger.LogAsync($"[LlamaCpp] Existing llama-server instance detected at {baseUrl}. Reusing it instead of starting a new process.");
@@ -297,6 +308,8 @@ namespace SharpestLlmStudio.Runtime
 
         public void UnloadModel()
         {
+            this.StopIdleMonitor();
+
             if (this._serverProcess != null)
             {
                 try
@@ -376,6 +389,7 @@ namespace SharpestLlmStudio.Runtime
 
         public void Dispose()
         {
+            this.StopIdleMonitor();
             this.UnloadModel();
 
             if (this._settings.KillExistingServerInstances)

@@ -15,6 +15,10 @@ namespace SharpestLlmStudio.Runtime
         private readonly Lock _conversationLock = new();
         private readonly Lock _knowledgeLock = new();
         private readonly Lock _generationStatsLock = new();
+        private readonly Lock _idleMonitorLock = new();
+        private System.Threading.Timer? _idleMonitorTimer;
+        private DateTime _lastServerActivityUtc = DateTime.UtcNow;
+        private int _activeServerRequests;
 
         public string AppDataDirectory { get; }
         public string ContextDirectory { get; }
@@ -161,6 +165,105 @@ namespace SharpestLlmStudio.Runtime
                     TotalContextTokens = this.LastGenerationStats.TotalContextTokens,
                     ContextSize = this.LastGenerationStats.ContextSize
                 };
+            }
+        }
+
+        private void TouchServerActivity()
+        {
+            this._lastServerActivityUtc = DateTime.UtcNow;
+        }
+
+        private IDisposable BeginServerActivityScope()
+        {
+            System.Threading.Interlocked.Increment(ref this._activeServerRequests);
+            this.TouchServerActivity();
+            return new ServerActivityScope(this);
+        }
+
+        private void EndServerActivityScope()
+        {
+            System.Threading.Interlocked.Decrement(ref this._activeServerRequests);
+            this.TouchServerActivity();
+        }
+
+        private void StartIdleMonitorIfEnabled()
+        {
+            int idleMinutes = Math.Max(0, this._settings.IdleShutdownMinutes);
+            if (idleMinutes <= 0)
+            {
+                this.StopIdleMonitor();
+                return;
+            }
+
+            int checkSeconds = Math.Max(5, this._settings.IdleCheckIntervalSeconds);
+
+            lock (this._idleMonitorLock)
+            {
+                this._idleMonitorTimer?.Dispose();
+                this._lastServerActivityUtc = DateTime.UtcNow;
+                this._idleMonitorTimer = new System.Threading.Timer(
+                    static state => ((LlamaCppClient)state!).OnIdleMonitorTick(),
+                    this,
+                    TimeSpan.FromSeconds(checkSeconds),
+                    TimeSpan.FromSeconds(checkSeconds));
+            }
+
+            _ = StaticLogger.LogAsync($"[LlamaCpp] Idle auto-shutdown enabled: {idleMinutes} min (check every {checkSeconds}s).");
+        }
+
+        private void StopIdleMonitor()
+        {
+            lock (this._idleMonitorLock)
+            {
+                this._idleMonitorTimer?.Dispose();
+                this._idleMonitorTimer = null;
+            }
+        }
+
+        private void OnIdleMonitorTick()
+        {
+            try
+            {
+                int idleMinutes = Math.Max(0, this._settings.IdleShutdownMinutes);
+                if (idleMinutes <= 0)
+                {
+                    return;
+                }
+
+                if (System.Threading.Volatile.Read(ref this._activeServerRequests) > 0)
+                {
+                    return;
+                }
+
+                var process = this._serverProcess;
+                if (process == null || process.HasExited)
+                {
+                    return;
+                }
+
+                var idleFor = DateTime.UtcNow - this._lastServerActivityUtc;
+                if (idleFor < TimeSpan.FromMinutes(idleMinutes))
+                {
+                    return;
+                }
+
+                StaticLogger.Log($"[LlamaCpp] Idle timeout reached after {idleFor.TotalMinutes:F1} min. Shutting down llama-server.");
+                this.UnloadModel();
+            }
+            catch (Exception ex)
+            {
+                StaticLogger.Log(ex, "Error in llama-server idle monitor callback");
+            }
+        }
+
+        private sealed class ServerActivityScope(LlamaCppClient owner) : IDisposable
+        {
+            private LlamaCppClient? _owner = owner;
+
+            public void Dispose()
+            {
+                var o = System.Threading.Interlocked.Exchange(ref this._owner, null);
+                o?.EndServerActivityScope();
             }
         }
 

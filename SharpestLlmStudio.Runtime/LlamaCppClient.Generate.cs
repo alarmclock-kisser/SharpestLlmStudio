@@ -54,6 +54,8 @@ namespace SharpestLlmStudio.Runtime
                 throw new InvalidOperationException("llama.cpp server is not running. Load a model first.");
             }
 
+            using var activityScope = this.BeginServerActivityScope();
+
             if (string.IsNullOrWhiteSpace(request.Prompt))
             {
                 yield break;
@@ -107,6 +109,7 @@ namespace SharpestLlmStudio.Runtime
                         {
                             await foreach (var chunk in this.StreamChatCompletionChunksAsync(payload, cancellationToken))
                             {
+                                this.TouchServerActivity();
                                 assistantText += chunk;
                                 outputChunks.Add(chunk);
 
@@ -126,6 +129,7 @@ namespace SharpestLlmStudio.Runtime
                         else
                         {
                             assistantText = await this.GenerateSingleChatCompletionAsync(payload, cancellationToken);
+                            this.TouchServerActivity();
 
                             lock (this._generationStatsLock)
                             {

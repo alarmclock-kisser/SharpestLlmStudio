@@ -15,6 +15,8 @@ namespace SharpestLlmStudio.Shared
         public string[] ModelDirectories { get; set; } = [];
 
         public bool KillExistingServerInstances { get; set; } = false;
+        public int IdleShutdownMinutes { get; set; } = 15;
+        public int IdleCheckIntervalSeconds { get; set; } = 15;
         public string DefaultModel { get; set; } = string.Empty;
         public int DefaultContextSize { get; set; } = 4096;
         public int DefaultMaxTokens { get; set; } = 2048;

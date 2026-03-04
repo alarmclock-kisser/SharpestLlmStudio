@@ -19,6 +19,25 @@ namespace SharpestLlmStudio.Shared
 
         public bool IsOmni { get; set; } = false;
 
+        /// <summary>
+        /// True if the model uses ternary quantization (TQ1_0, TQ2_0), which is incompatible with Flash Attention in llama.cpp/CUDA.
+        /// </summary>
+        public bool IsTernaryQuantized
+        {
+            get
+            {
+                string[] candidates = [this.Name, Path.GetFileNameWithoutExtension(this.ModelFilePath)];
+                foreach (var candidate in candidates)
+                {
+                    if (System.Text.RegularExpressions.Regex.IsMatch(candidate, @"(?:^|[-_.\s])TQ[12]_0(?:[-_.\s]|$)", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
+
         public DateTime LastModified
         {
             get

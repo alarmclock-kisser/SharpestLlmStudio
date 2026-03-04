@@ -17,6 +17,8 @@ namespace SharpestLlmStudio.Runtime
                 throw new InvalidOperationException("llama.cpp server is not running. Load a model first.");
             }
 
+            using var activityScope = this.BeginServerActivityScope();
+
             // Chunk large content to avoid exceeding the model's context window
             const int MaxChunkChars = 2000;
             if (content.Length <= MaxChunkChars)
@@ -89,6 +91,7 @@ namespace SharpestLlmStudio.Runtime
                             vector[i] = embeddingNode[i]?.GetValue<float>() ?? 0f;
                         }
 
+                        this.TouchServerActivity();
                         return vector;
                     }
                 }
@@ -130,6 +133,7 @@ namespace SharpestLlmStudio.Runtime
                                         vector[i] = altEmbeddingNode[i]?.GetValue<float>() ?? 0f;
                                     }
 
+                                    this.TouchServerActivity();
                                     return vector;
                                 }
                             }

@@ -1328,6 +1328,10 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     await StaticLogger.LogAsync($"[Blazor]   ModelFile  : {modelToLoad.ModelFilePath}");
                     await StaticLogger.LogAsync($"[Blazor]   Mmproj     : {(loadRequest.IncludeMmproj ? modelToLoad.MmprojFilePath ?? "(none)" : "(disabled)")}");
                     await StaticLogger.LogAsync($"[Blazor]   Context    : {loadRequest.ContextSize}  FlashAttn: {loadRequest.UseFlashAttention}");
+                    if (loadRequest.UseFlashAttention && modelToLoad.IsTernaryQuantized)
+                    {
+                        await StaticLogger.LogAsync($"[Blazor]   NOTE: Flash Attention will be auto-disabled for ternary quantized model '{modelToLoad.Name}'.");
+                    }
                     await StaticLogger.LogAsync($"[Blazor]   Endpoint   : http://{loadRequest.Host}:{loadRequest.Port}");
 
                     this.ModelLoadingTimeString = "Loading model…";
