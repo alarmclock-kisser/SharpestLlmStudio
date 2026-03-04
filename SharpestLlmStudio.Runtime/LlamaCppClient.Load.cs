@@ -195,6 +195,7 @@ namespace SharpestLlmStudio.Runtime
                     {
                         msg += $"\n{serverOutput}";
                     }
+                    msg = BuildKnownLoadErrorHint(msg, serverOutput, request.ModelInfo.ModelFilePath);
                     await StaticLogger.LogAsync($"[LlamaCpp] {msg}");
                     return new LlamaModelLoadResult { Success = false, ErrorMessage = msg, LoadTime = stopwatch.Elapsed };
                 }
@@ -215,8 +216,27 @@ namespace SharpestLlmStudio.Runtime
                 {
                     msg += $"\n{serverOutput}";
                 }
+                msg = BuildKnownLoadErrorHint(msg, serverOutput, request.ModelInfo.ModelFilePath);
                 return new LlamaModelLoadResult { Success = false, ErrorMessage = msg, LoadTime = stopwatch.Elapsed };
             }
+        }
+
+        private static string BuildKnownLoadErrorHint(string message, string? serverOutput, string modelPath)
+        {
+            if (string.IsNullOrWhiteSpace(serverOutput))
+            {
+                return message;
+            }
+
+            if (serverOutput.Contains("not a multiple of block size", StringComparison.OrdinalIgnoreCase)
+                && serverOutput.Contains("tq2_0", StringComparison.OrdinalIgnoreCase))
+            {
+                return message
+                    + "\n\nHint: This GGUF uses TQ2 quantization with tensor shapes that are incompatible with the current llama.cpp loader (block-size constraint). "
+                    + "This is not a runtime flag issue. Try a newer llama.cpp build and/or a different quantization (e.g. Q4_K_M, Q5_K_M, Q8_0) for this model.";
+            }
+
+            return message;
         }
 
         public Task<LlamaModelLoadResult?> TryAttachToRunningServerAsync(string host = "127.0.0.1", int port = 8080, int contextSize = 4096, CancellationToken cancellationToken = default)
