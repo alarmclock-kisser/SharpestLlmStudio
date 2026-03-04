@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Xml.Linq;
+using SharpestLlmStudio.Shared;
 
 namespace SharpestLlmStudio.Runtime
 {
@@ -20,7 +21,7 @@ namespace SharpestLlmStudio.Runtime
             const int MaxChunkChars = 2000;
             if (content.Length <= MaxChunkChars)
             {
-                return await this.CreateSingleEmbeddingAsync(content, cancellationToken);
+                return await this.CreateSingleEmbeddingAsync(content, cancellationToken, suppressLogging: false);
             }
 
             var chunks = ChunkText(content, MaxChunkChars);
@@ -30,7 +31,7 @@ namespace SharpestLlmStudio.Runtime
             foreach (var chunk in chunks)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var vec = await this.CreateSingleEmbeddingAsync(chunk, cancellationToken);
+                var vec = await this.CreateSingleEmbeddingAsync(chunk, cancellationToken, suppressLogging: true);
                 if (vec.Length == 0)
                 {
                     continue;
@@ -63,27 +64,145 @@ namespace SharpestLlmStudio.Runtime
             return accumulated;
         }
 
-        private async Task<float[]> CreateSingleEmbeddingAsync(string content, CancellationToken cancellationToken)
+        private async Task<float[]> CreateSingleEmbeddingAsync(string content, CancellationToken cancellationToken, bool suppressLogging = false)
         {
-            var payload = new JsonObject
+            // Try server-side embedding first (requires --embedding flag)
+            try
             {
-                ["input"] = content
-            };
+                var payload = new JsonObject
+                {
+                    ["input"] = content,
+                    // ask server to use a compatible pooling for OAI-style embeddings
+                    ["pooling"] = "mean"
+                };
 
-            using var response = await this._httpClient.PostAsJsonAsync($"{this.CurrentBaseUrl}/v1/embeddings", payload, cancellationToken);
-            response.EnsureSuccessStatusCode();
+                using var response = await this._httpClient.PostAsJsonAsync($"{this.CurrentBaseUrl}/v1/embeddings", payload, cancellationToken);
+                if (response.IsSuccessStatusCode)
+                {
+                    var json = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken);
+                    var embeddingNode = json?["data"]?[0]?["embedding"]?.AsArray();
+                    if (embeddingNode != null && embeddingNode.Count > 0)
+                    {
+                        var vector = new float[embeddingNode.Count];
+                        for (int i = 0; i < embeddingNode.Count; i++)
+                        {
+                            vector[i] = embeddingNode[i]?.GetValue<float>() ?? 0f;
+                        }
 
-            var json = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken);
-            var embeddingNode = json?["data"]?[0]?["embedding"]?.AsArray();
-            if (embeddingNode == null || embeddingNode.Count == 0)
+                        return vector;
+                    }
+                }
+
+                if (!suppressLogging)
+                {
+                    string errorBody = string.Empty;
+                    try
+                    {
+                        errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
+                    }
+                    catch
+                    {
+                    }
+
+                    // If server complains about pooling 'none', retry with alternative pooling key names
+                    if (errorBody != null && errorBody.Contains("Pooling type 'none'", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            var altPayload = new JsonObject
+                            {
+                                ["input"] = content,
+                                ["pooling"] = "mean",
+                                ["pooling_type"] = "mean",
+                                ["pooling_mode"] = "mean"
+                            };
+
+                            using var altResp = await this._httpClient.PostAsJsonAsync($"{this.CurrentBaseUrl}/v1/embeddings", altPayload, cancellationToken);
+                            if (altResp.IsSuccessStatusCode)
+                            {
+                                var altJson = await altResp.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken);
+                                var altEmbeddingNode = altJson?["data"]?[0]?["embedding"]?.AsArray();
+                                if (altEmbeddingNode != null && altEmbeddingNode.Count > 0)
+                                {
+                                    var vector = new float[altEmbeddingNode.Count];
+                                    for (int i = 0; i < altEmbeddingNode.Count; i++)
+                                    {
+                                        vector[i] = altEmbeddingNode[i]?.GetValue<float>() ?? 0f;
+                                    }
+
+                                    return vector;
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+
+                    // Any non-success from embedding endpoint falls back to local embedding.
+                    // This covers 501 (not enabled), 400 (model/server variant specific request mismatch), etc.
+                    await StaticLogger.LogAsync($"[LlamaCpp] /v1/embeddings returned {(int)response.StatusCode} ({response.ReasonPhrase}). Falling back to local embedding. Body: {errorBody}");
+                }
+            }
+            catch (HttpRequestException ex)
             {
-                return [];
+                if (!suppressLogging)
+                {
+                    await StaticLogger.LogAsync($"[LlamaCpp] Embedding request failed ({ex.Message}). Falling back to local embedding.");
+                }
             }
 
-            var vector = new float[embeddingNode.Count];
-            for (int i = 0; i < embeddingNode.Count; i++)
+            // Local fallback: hash-based bag-of-words embedding
+            // Works without server support, sufficient for keyword-based similarity
+            return CreateLocalEmbedding(content);
+        }
+
+        /// <summary>
+        /// Creates a simple local embedding vector using character n-gram hashing.
+        /// This is a fallback for when the server doesn't support /v1/embeddings
+        /// (e.g. multimodal or Omni models loaded without --embedding).
+        /// </summary>
+        private static float[] CreateLocalEmbedding(string content, int dimensions = 384)
+        {
+            var vector = new float[dimensions];
+            if (string.IsNullOrWhiteSpace(content))
             {
-                vector[i] = embeddingNode[i]?.GetValue<float>() ?? 0f;
+                return vector;
+            }
+
+            var normalized = content.ToLowerInvariant();
+
+            // Token-level hashing (words)
+            var tokens = normalized.Split([' ', '\n', '\r', '\t', ',', '.', ';', ':', '!', '?', '(', ')', '[', ']', '{', '}', '"', '\''],
+                StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (var token in tokens)
+            {
+                int hash = token.GetHashCode(StringComparison.Ordinal);
+                int idx = ((hash % dimensions) + dimensions) % dimensions;
+                vector[idx] += 1.0f;
+
+                // Also add bigram hashes for better discrimination
+                for (int i = 0; i < token.Length - 1; i++)
+                {
+                    int bigramHash = HashCode.Combine(token[i], token[i + 1]);
+                    int bigramIdx = ((bigramHash % dimensions) + dimensions) % dimensions;
+                    vector[bigramIdx] += 0.5f;
+                }
+            }
+
+            // L2-normalize the vector
+            double norm = 0;
+            for (int i = 0; i < vector.Length; i++)
+            {
+                norm += vector[i] * vector[i];
+            }
+
+            if (norm > 0)
+            {
+                float invNorm = (float)(1.0 / Math.Sqrt(norm));
+                for (int i = 0; i < vector.Length; i++)
+                {
+                    vector[i] *= invNorm;
+                }
             }
 
             return vector;
@@ -303,6 +422,23 @@ namespace SharpestLlmStudio.Runtime
             lock (this._knowledgeLock)
             {
                 this.KnowledgeEntries.Clear();
+            }
+        }
+
+        // Returns a snapshot of current knowledge entries for UI consumption
+        public IReadOnlyList<LlamaKnowledgeEntry> GetKnowledgeEntriesSnapshot()
+        {
+            lock (this._knowledgeLock)
+            {
+                return this.KnowledgeEntries.Select(k => new LlamaKnowledgeEntry
+                {
+                    Id = k.Id,
+                    Key = k.Key,
+                    Content = k.Content,
+                    SourcePath = k.SourcePath,
+                    Vector = k.Vector,
+                    CreatedAtUtc = k.CreatedAtUtc
+                }).ToList();
             }
         }
 

@@ -23,6 +23,7 @@
             <RadzenNumeric TValue="int" @bind-Value="logFontSizePx" Min="6" Max="24" Step="1" Style="width:64px;height:1.8rem" Name="logFontSizeInput" class="compact-numeric" />
 
             <RadzenButton Icon="content_copy" Size="ButtonSize.Small" Variant="Variant.Flat" ButtonStyle="ButtonStyle.Light" Click="CopyLogsToClipboardAsync" Disabled="@(_logEntryCount == 0)" />
+            <RadzenButton Icon="download" Size="ButtonSize.Small" Variant="Variant.Flat" ButtonStyle="ButtonStyle.Light" Click="DownloadLogsAsFileAsync" Disabled="@(!HasDownloadableLogs)" />
         </RadzenStack>
 
         <div id="@logContainerId" class="log-container @(wrapLogs ? "wrap" : "nowrap")" style="font-size:@($"{logFontSizePx}px")">
@@ -182,7 +183,7 @@
     private bool wrapLogs;
     private int logFontSizePx = 10;
     private int hardwareRefreshIntervalMs = 1000;
-    private int hwPanelHeight = 400;
+    private int hwPanelHeight = 520;
     private int _logEntryCount;
 
     private int HardwareRefreshIntervalMsValue
@@ -223,7 +224,7 @@
 
         if (this.hardwareExpanded)
         {
-            await this.JSRuntime.InvokeVoidAsync("sharpestNavMenu.setupVerticalResizeHandle", "hw-panel-resize-handle", "hw-panel-content", 120, 800);
+            await this.JSRuntime.InvokeVoidAsync("sharpestNavMenu.setupVerticalResizeHandle", "hw-panel-resize-handle", "hw-panel-content", 120, 1000);
         }
 
         if (!this._pendingLogScroll)
@@ -251,6 +252,33 @@
     {
         var logs = string.Join(Environment.NewLine, this._logEntries);
         await this.JSRuntime.InvokeVoidAsync("sharpestNavMenu.copyText", logs);
+    }
+
+    private bool HasDownloadableLogs => this._logEntryCount > 0 || (!string.IsNullOrWhiteSpace(StaticLogger.LogFilePath) && File.Exists(StaticLogger.LogFilePath));
+
+    private async Task DownloadLogsAsFileAsync()
+    {
+        try
+        {
+            string fileName;
+            string content;
+
+            if (!string.IsNullOrWhiteSpace(StaticLogger.LogFilePath) && File.Exists(StaticLogger.LogFilePath))
+            {
+                fileName = Path.GetFileName(StaticLogger.LogFilePath);
+                content = await File.ReadAllTextAsync(StaticLogger.LogFilePath);
+            }
+            else
+            {
+                fileName = $"logs_{DateTime.Now:yyyyMMdd_HHmmss}.log";
+                content = string.Join(Environment.NewLine, this._logEntries);
+            }
+
+            await this.JSRuntime.InvokeVoidAsync("sharpestNavMenu.downloadTextAsFile", fileName, content);
+        }
+        catch
+        {
+        }
     }
 
     private void ToggleHardwareExpanded()

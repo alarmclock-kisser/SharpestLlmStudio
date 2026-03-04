@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Text;
 using System.IO;
@@ -17,6 +17,8 @@ namespace SharpestLlmStudio.Shared
 
         public double SizeInMb { get; set; } = 0;
 
+        public bool IsOmni { get; set; } = false;
+
         public DateTime LastModified
         {
             get
@@ -27,8 +29,23 @@ namespace SharpestLlmStudio.Shared
             }
         }
 
+        public string DisplayName
+        {
+            get
+            {
+                string tag = "[ ≡ ] ";
+                if (this.IsOmni)
+                {
+                    tag = "[ ☆ ] ";
+                }
+                else if (File.Exists(this.MmprojFilePath))
+                {
+                    tag = "[ ◎ ]";
+                }
 
-        public string DisplayName => $"{(File.Exists(this.MmprojFilePath) ? "[VL] " : "[ ≡ ] ")}{this.Name} <{(this.ParametersB.HasValue ? $"{(this.ParametersB < 1 ? $"{(int) (this.ParametersB * 1000)}M" : $"{(int) (this.ParametersB)}B")}" : "?")}> ({(this.SizeInMb / 1024.0):F3} GB)";
+                return $"{tag}{this.Name} <{(this.ParametersB.HasValue ? $"{(this.ParametersB < 1 ? $"{(int)(this.ParametersB * 1000)}M" : $"{(int)(this.ParametersB)}B")}" : "?")}> ({(this.SizeInMb / 1024.0):F3} GB)";
+            }
+        }
 
 
         public LlamaModelInfo(string modelRootDirectory)
@@ -45,36 +62,57 @@ namespace SharpestLlmStudio.Shared
             if (modelFiles.Length <= 0)
             {
                 throw new Exception($"No .gguf model file found in directory: {modelRootDirectory}");
-
             }
-            else if (modelFiles.Length > 2)
+
+            // Special case for MiniCPM-o: It often has many .gguf files (shards/adapters)
+            bool isMiniCPM = this.Name.Contains("MiniCPM", StringComparison.OrdinalIgnoreCase);
+
+            if (modelFiles.Length > 2 && !isMiniCPM)
             {
                 throw new Exception($"Too many (>2) .gguf model file found in directory: {modelRootDirectory}");
             }
 
-            if (modelFiles.Length == 1)
+            // Detect Omni status based on file count
+            this.IsOmni = modelFiles.Length > 2 || isMiniCPM;
+
+            // Detect mmproj / vision / encoder gguf files
+            // For Omni models (e.g. MiniCPM-o), the vision component may not be named "mmproj"
+            // but instead "vision", "encoder", "projector", etc.
+            string[] visionKeywords = ["mmproj", "vision", "encoder", "projector"];
+
+            string? FindVisionFile(string[] files)
             {
-                this.ModelFilePath = modelFiles[0];
+                foreach (var keyword in visionKeywords)
+                {
+                    var match = files.FirstOrDefault(f => Path.GetFileName(f).Contains(keyword, StringComparison.OrdinalIgnoreCase));
+                    if (match != null)
+                    {
+                        return match;
+                    }
+                }
+                return null;
+            }
+
+            bool IsVisionFile(string f)
+            {
+                var name = Path.GetFileName(f);
+                return visionKeywords.Any(k => name.Contains(k, StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (modelFiles.Length == 1 || (isMiniCPM && modelFiles.Length > 0))
+            {
+                // For MiniCPM, we pick the main model file (the one without vision keywords).
+                this.ModelFilePath = modelFiles.FirstOrDefault(f => !IsVisionFile(f)) ?? modelFiles[0];
+                this.MmprojFilePath = FindVisionFile(modelFiles);
             }
             else
             {
-                this.MmprojFilePath = modelFiles.FirstOrDefault(f => f.Contains("mmproj", StringComparison.OrdinalIgnoreCase));
-                if (this.MmprojFilePath == null)
-                {
-                    throw new Exception($"Multiple .gguf model files found but no mmproj file found in directory: {modelRootDirectory}");
-                }
-                this.ModelFilePath = modelFiles.FirstOrDefault(f => !f.Contains("mmproj", StringComparison.OrdinalIgnoreCase)) ?? string.Empty;
-                if (string.IsNullOrEmpty(this.ModelFilePath))
-                {
-                    throw new Exception($"Multiple .gguf model files found but no non-mmproj file found in directory: {modelRootDirectory}");
-                }
+                this.MmprojFilePath = FindVisionFile(modelFiles);
+                this.ModelFilePath = modelFiles.FirstOrDefault(f => !IsVisionFile(f)) ?? string.Empty;
             }
+
             // Get size of model file and mmproj file (if exists)
-            long modelFileSize = new FileInfo(this.ModelFilePath).Length;
-            if (File.Exists(this.MmprojFilePath))
-            {
-                modelFileSize += new FileInfo(this.MmprojFilePath).Length;
-            }
+            long modelFileSize = Directory.GetFiles(modelRootDirectory, "*.gguf", SearchOption.AllDirectories).Sum(f => new FileInfo(f).Length);
             this.SizeInMb = modelFileSize / (1024.0 * 1024.0);
 
             // Try to parse parameters from directory name first, then file name
@@ -120,11 +158,11 @@ namespace SharpestLlmStudio.Shared
         public int ContextSize { get; set; } = 4096;
 
         // Multimodal Projection mitladen?
-            public bool IncludeMmproj { get; set; } = true;
+        public bool IncludeMmproj { get; set; } = true;
 
-            // Weitere optionale Server-Parameter für später (z.B. Flash Attention)
-            public bool UseFlashAttention { get; set; } = true;
-        }
+        // Weitere optionale Server-Parameter für später (z.B. Flash Attention)
+        public bool UseFlashAttention { get; set; } = true;
+    }
 
     public class LlamaModelLoadResult
     {
@@ -132,5 +170,7 @@ namespace SharpestLlmStudio.Shared
         public string? ErrorMessage { get; set; }
         public string BaseApiUrl { get; set; } = string.Empty;
         public TimeSpan LoadTime { get; set; }
+        public bool ReusedExistingInstance { get; set; }
+        public string? ActiveModelId { get; set; }
     }
 }

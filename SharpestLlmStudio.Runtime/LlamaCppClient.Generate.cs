@@ -83,94 +83,133 @@ namespace SharpestLlmStudio.Runtime
                 {
                     GenerationStarted = DateTime.UtcNow,
                     GenerationFinished = null,
+                    TimeTilFirstToken = 0.0,
                     TotalTokensGenerated = 0,
                     TotalContextTokens = 0,
                     ContextSize = this.CurrentContextSize
                 };
             }
 
-            while (retryCount <= maxRetries)
-            {
-                var payload = this.BuildChatCompletionPayload(request, normalizedImages);
-                var outputChunks = new List<string>();
-                bool completed = false;
+            var outputChunks = new List<string>();
+            bool completed = false;
 
-                try
+            try
+            {
+                while (retryCount <= maxRetries)
                 {
-                    if (request.Stream)
+                    var payload = this.BuildChatCompletionPayload(request, normalizedImages);
+                    outputChunks.Clear();
+                    completed = false;
+
+                    try
                     {
-                        await foreach (var chunk in this.StreamChatCompletionChunksAsync(payload, cancellationToken))
+                        if (request.Stream)
                         {
-                            assistantText += chunk;
-                            outputChunks.Add(chunk);
+                            await foreach (var chunk in this.StreamChatCompletionChunksAsync(payload, cancellationToken))
+                            {
+                                assistantText += chunk;
+                                outputChunks.Add(chunk);
+
+                                lock (this._generationStatsLock)
+                                {
+                                    if (this.LastGenerationStats.TimeTilFirstToken <= 0.0 && this.LastGenerationStats.GenerationStarted.HasValue)
+                                    {
+                                        this.LastGenerationStats.TimeTilFirstToken = Math.Max(0.0, (DateTime.UtcNow - this.LastGenerationStats.GenerationStarted.Value).TotalSeconds);
+                                    }
+
+                                    this.LastGenerationStats.TotalTokensGenerated = CountRoughTokens(assistantText);
+                                    this.LastGenerationStats.TotalContextTokens = CountRoughTokens(payload["messages"]?.ToJsonString() ?? "") + CountRoughTokens(assistantText);
+                                    this.LastGenerationStats.GenerationFinished = null;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            assistantText = await this.GenerateSingleChatCompletionAsync(payload, cancellationToken);
 
                             lock (this._generationStatsLock)
                             {
+                                if (this.LastGenerationStats.TimeTilFirstToken <= 0.0)
+                                {
+                                    this.LastGenerationStats.TimeTilFirstToken = 0.0;
+                                }
+
                                 this.LastGenerationStats.TotalTokensGenerated = CountRoughTokens(assistantText);
                                 this.LastGenerationStats.TotalContextTokens = CountRoughTokens(payload["messages"]?.ToJsonString() ?? "") + CountRoughTokens(assistantText);
-                                this.LastGenerationStats.GenerationFinished = null;
+                            }
+
+                            if (!string.IsNullOrEmpty(assistantText))
+                            {
+                                outputChunks.Add(assistantText);
                             }
                         }
+
+                        completed = true;
                     }
-                    else
+                    catch (HttpRequestException ex) when (ex.Message.Contains("400") && ex.Message.Contains("context", StringComparison.OrdinalIgnoreCase) && retryCount < maxRetries)
                     {
-                        assistantText = await this.GenerateSingleChatCompletionAsync(payload, cancellationToken);
+                        // Context overflow — trim oldest conversation messages (ring buffer) and retry
+                        retryCount++;
+                        await StaticLogger.LogAsync($"[LlamaCpp] Context overflow on attempt {retryCount}, trimming oldest messages and retrying...");
 
-                        lock (this._generationStatsLock)
+                        lock (this._conversationLock)
                         {
-                            this.LastGenerationStats.TotalTokensGenerated = CountRoughTokens(assistantText);
-                            this.LastGenerationStats.TotalContextTokens = CountRoughTokens(payload["messages"]?.ToJsonString() ?? "") + CountRoughTokens(assistantText);
+                            // Remove the 2 oldest non-system messages (1 user + 1 assistant pair)
+                            int removed = 0;
+                            while (removed < 2 && this.ConversationMessages.Count > 0)
+                            {
+                                this.ConversationMessages.RemoveAt(0);
+                                removed++;
+                            }
                         }
 
-                        if (!string.IsNullOrEmpty(assistantText))
+                        if (this.ConversationMessages.Count == 0)
                         {
-                            outputChunks.Add(assistantText);
+                            // No more history to trim — re-throw
+                            throw;
                         }
+
+                        assistantText = string.Empty;
+                        continue;
+                    }
+                    catch (System.IO.IOException ioEx)
+                    {
+                        // Server closed the connection (likely crashed, e.g. OOM or internal error)
+                        bool serverDead = this._serverProcess != null && this._serverProcess.HasExited;
+                        string detail = serverDead
+                            ? $"llama-server process has exited (exit code {this._serverProcess!.ExitCode}). The model may have run out of memory."
+                            : "llama-server closed the connection unexpectedly.";
+                        await StaticLogger.LogAsync($"[LlamaCpp] IOException during generation: {ioEx.Message} — {detail}");
+                        throw new InvalidOperationException($"{detail} ({ioEx.Message})", ioEx);
+                    }
+                    catch (HttpRequestException httpEx) when (httpEx.InnerException is System.IO.IOException)
+                    {
+                        bool serverDead = this._serverProcess != null && this._serverProcess.HasExited;
+                        string detail = serverDead
+                            ? $"llama-server process has exited (exit code {this._serverProcess!.ExitCode}). The model may have run out of memory."
+                            : "llama-server closed the connection unexpectedly.";
+                        await StaticLogger.LogAsync($"[LlamaCpp] Connection lost during generation: {httpEx.Message} — {detail}");
+                        throw new InvalidOperationException($"{detail} ({httpEx.Message})", httpEx);
                     }
 
-                    completed = true;
+                    if (completed)
+                    {
+                        break;
+                    }
                 }
-                catch (HttpRequestException ex) when (ex.Message.Contains("400") && ex.Message.Contains("context", StringComparison.OrdinalIgnoreCase) && retryCount < maxRetries)
+            }
+            finally
+            {
+                // Always finalize generation stats so the timer stops, even on exceptions
+                lock (this._generationStatsLock)
                 {
-                    // Context overflow — trim oldest conversation messages (ring buffer) and retry
-                    retryCount++;
-                    await StaticLogger.LogAsync($"[LlamaCpp] Context overflow on attempt {retryCount}, trimming oldest messages and retrying...");
-
-                    lock (this._conversationLock)
-                    {
-                        // Remove the 2 oldest non-system messages (1 user + 1 assistant pair)
-                        int removed = 0;
-                        while (removed < 2 && this.ConversationMessages.Count > 0)
-                        {
-                            this.ConversationMessages.RemoveAt(0);
-                            removed++;
-                        }
-                    }
-
-                    if (this.ConversationMessages.Count == 0)
-                    {
-                        // No more history to trim — re-throw
-                        throw;
-                    }
-
-                    assistantText = string.Empty;
-                    continue;
-                }
-
-                if (completed)
-                {
-                    foreach (var chunk in outputChunks)
-                    {
-                        yield return chunk;
-                    }
-
-                    break;
+                    this.LastGenerationStats.GenerationFinished = DateTime.UtcNow;
                 }
             }
 
-            lock (this._generationStatsLock)
+            foreach (var chunk in outputChunks)
             {
-                this.LastGenerationStats.GenerationFinished = DateTime.UtcNow;
+                yield return chunk;
             }
 
             if (!request.Isolated && request.PersistConversation)

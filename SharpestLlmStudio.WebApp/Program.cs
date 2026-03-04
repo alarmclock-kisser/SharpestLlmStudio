@@ -99,7 +99,7 @@ namespace SharpestLlmStudio.WebApp
                 .AddInteractiveServerRenderMode();
 
             // Kill llama-server processes on app shutdown (including debug stop)
-            if (webAppSettings.KillExistingServerInstancesBeforeLoad)
+            if (webAppSettings.KillExistingServerInstances)
             {
                 void KillLlamaServersOnShutdown()
                 {

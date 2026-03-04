@@ -19,13 +19,19 @@
     }
     <RadzenCard class="chat-card">
         <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" class="rz-mb-2">
-            <RadzenIcon Icon="memory" />
-            <RadzenText TextStyle="TextStyle.H5" Text="Model Management" class="rz-mb-0" />
+            <div style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;" @onclick="ToggleModelExpandedAsync">
+                <RadzenIcon Icon="memory" />
+                <RadzenText TextStyle="TextStyle.H5" Text="Model Management" class="rz-mb-0" />
+            </div>
             <div style="flex:1"></div>
             @if (!VM.IsModelPanelExpanded)
             {
                 <RadzenBadge BadgeStyle="@(VM.IsLoaded ? BadgeStyle.Success : BadgeStyle.Danger)"
                              Text="@(VM.IsLoaded ? "Loaded" : "Not Loaded")" />
+                @if (VM.IsReusedInstance)
+                {
+                    <RadzenBadge BadgeStyle="BadgeStyle.Info" Text="Reused instance" />
+                }
                 @if (VM.IsLoaded && VM.LoadedModel != null)
                 {
                     <RadzenText class="collapsed-model-name" Text="@($"({VM.LoadedModel.Name})")" TextStyle="TextStyle.Caption" />
@@ -37,6 +43,13 @@
         <div class="collapsible @(VM.IsModelPanelExpanded ? "expanded" : "collapsed")">
             <RadzenStack Gap="1rem" class="collapsible-inner">
                 <div style="display:flex;gap:0.5rem;align-items:center;width:100%;">
+                    <div style="width:220px;display:flex;flex-direction:column;align-items:flex-start;">
+                        <div style="display:flex;align-items:center;gap:0.25rem;">
+                            <button class="rz-button" type="button" @onclick="@(async () => { VM.ModelSortIndex = Math.Max(0, VM.ModelSortIndex - 1); await Task.CompletedTask; })" disabled="@(VM.ModelSortIndex == 0)">▲</button>
+                            <button class="rz-button" type="button" @onclick="@(async () => { VM.ModelSortIndex = Math.Min(HomeViewModel.ModelSortOptions.Count - 1, VM.ModelSortIndex + 1); await Task.CompletedTask; })" disabled="@(VM.ModelSortIndex == HomeViewModel.ModelSortOptions.Count - 1)">▼</button>
+                            <span style="margin-left:0.5rem;font-size:0.9rem;">@HomeViewModel.ModelSortOptions[VM.ModelSortIndex]  </span>
+                        </div>
+                    </div>
                     <div style="flex:1;">
                         <RadzenFormField Text="Model" Variant="Variant.Outlined" Style="width:100%;">
                             <ChildContent>
@@ -51,18 +64,10 @@
                             </ChildContent>
                         </RadzenFormField>
                     </div>
-
-                    <div style="width:220px;display:flex;flex-direction:column;align-items:flex-start;">
-                        <div style="display:flex;align-items:center;gap:0.25rem;">
-                            <button class="rz-button" type="button" @onclick="@(async () => { VM.ModelSortIndex = Math.Max(0, VM.ModelSortIndex - 1); await Task.CompletedTask; })" disabled="@(VM.ModelSortIndex == 0)">▲</button>
-                            <button class="rz-button" type="button" @onclick="@(async () => { VM.ModelSortIndex = Math.Min(HomeViewModel.ModelSortOptions.Count - 1, VM.ModelSortIndex + 1); await Task.CompletedTask; })" disabled="@(VM.ModelSortIndex == HomeViewModel.ModelSortOptions.Count - 1)">▼</button>
-                            <span style="margin-left:0.5rem;font-size:0.9rem;">@HomeViewModel.ModelSortOptions[VM.ModelSortIndex]</span>
-                        </div>
-                    </div>
                 </div>
 
                 <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
-                    <RadzenCheckBox @bind-Value="VM.UseMmproj" Disabled="@(!HasMmproj || VM.IsLoaded || VM.IsBusy)" TValue="bool" />
+                    <RadzenCheckBox @bind-Value="VM.UseMmproj" Disabled="@(IsSelectedOmni || !HasMmproj || VM.IsLoaded || VM.IsBusy)" TValue="bool" />
                     <RadzenLabel Text="@MmprojLabel" Style="cursor:pointer;" />
                 </RadzenStack>
 
@@ -117,8 +122,10 @@
 
     <RadzenCard>
         <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" class="rz-mb-2">
-            <RadzenIcon Icon="save" />
-            <RadzenText TextStyle="TextStyle.H6" Text="Context Management" class="rz-mb-0" />
+            <div style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;" @onclick="ToggleContextExpandedAsync">
+                <RadzenIcon Icon="save" />
+                <RadzenText TextStyle="TextStyle.H6" Text="Context Management" class="rz-mb-0" />
+            </div>
             <div style="flex:1"></div>
             <RadzenButton Icon="@(VM.IsContextPanelExpanded ? "remove" : "add")" Size="ButtonSize.Small" class="collapse-btn" Click="ToggleContextExpandedAsync" />
         </RadzenStack>
@@ -143,8 +150,10 @@
 
     <RadzenCard>
         <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" class="rz-mb-2">
-            <RadzenIcon Icon="hub" />
-            <RadzenText TextStyle="TextStyle.H6" Text="Knowledge Base" class="rz-mb-0" />
+            <div style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;" @onclick="ToggleKnowledgeExpandedAsync">
+                <RadzenIcon Icon="hub" />
+                <RadzenText TextStyle="TextStyle.H6" Text="Knowledge Base" class="rz-mb-0" />
+            </div>
             <div style="flex:1"></div>
             <RadzenButton Icon="@(VM.IsKnowledgePanelExpanded ? "remove" : "add")" Size="ButtonSize.Small" class="collapse-btn" Click="ToggleKnowledgeExpandedAsync" />
         </RadzenStack>
@@ -166,6 +175,21 @@
                 </RadzenStack>
 
                 <RadzenTextArea @bind-Value="VM.KnowledgeContent" Rows="4" Placeholder="JSON/XML/Text content for vectorization..." Style="width:100%;" Name="knowledgeContent" />
+
+                @if (VM.KnowledgeEntries.Count > 0)
+                {
+                    <div class="knowledge-entries">
+                        <h4>Imported Knowledge</h4>
+                        @foreach (var e in VM.KnowledgeEntries)
+                        {
+                            <div class="knowledge-entry">
+                                <div><strong>@e.Key</strong> <span class="source">@e.SourcePath</span></div>
+                                @{ var contentVal = e.Content ?? string.Empty; var shortVal = contentVal.Length > 200 ? contentVal.Substring(0,200) + "..." : contentVal; }
+                                <div class="preview">@((MarkupString)System.Net.WebUtility.HtmlEncode(shortVal))</div>
+                            </div>
+                        }
+                    </div>
+                }
 
                 <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap">
                     <RadzenFormField Text="Search Query" Variant="Variant.Outlined">
@@ -348,10 +372,13 @@
 
     private LlamaModelInfo? SelectedModelInfo => VM.LlamaModels.FirstOrDefault(m => m.Name == VM.SelectedModelName);
     private bool HasMmproj => SelectedModelInfo?.MmprojFilePath != null;
+    private bool IsSelectedOmni => SelectedModelInfo?.IsOmni == true;
 
-    private string MmprojLabel => HasMmproj
-        ? "Load multimodal projection (mmproj)"
-        : "Multimodal projection – not available for this model";
+    private string MmprojLabel => IsSelectedOmni
+        ? "Model is Any-to-Any (Omni)"
+        : HasMmproj
+            ? "Load multimodal projection (mmproj)"
+            : "Multimodal projection – not available for this model";
 
     private string GenerationStatsSummary
     {
@@ -364,7 +391,8 @@
             }
 
             string total = stats.TotalGenerationTime.HasValue ? $"{stats.TotalGenerationTime.Value.TotalSeconds:F1}s" : "-";
-            return $"(tok: {stats.TotalTokensGenerated} | tok/s: {stats.TokensPerSecond:F3} | total: {total}) [{stats.TotalContextTokens} of {stats.ContextSize} tokens used]";
+            string ttft = stats.TimeTilFirstToken > 0 ? $"{stats.TimeTilFirstToken:F3}s" : "-";
+            return $"(tok: {stats.TotalTokensGenerated} | tok/s: {stats.TokensPerSecond:F3} | TTFT: {ttft} | total: {total}) [{stats.TotalContextTokens} of {stats.ContextSize} tokens used]";
         }
     }
 
@@ -408,7 +436,7 @@
 
     private void OnSelectedModelChanged()
     {
-        VM.UseMmproj = HasMmproj;
+        VM.UseMmproj = HasMmproj || IsSelectedOmni;
     }
 
     private async Task OnToggleModelAsync()

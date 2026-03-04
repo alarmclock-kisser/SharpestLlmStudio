@@ -48,7 +48,7 @@
     font-family: Consolas, monospace;
     background: rgba(0, 0, 0, 0.12);
     min-height: 140px;
-    max-height: 320px;
+    max-height: 50vh;
 }
 
 .log-container.nowrap {

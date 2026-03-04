@@ -1,7 +1,9 @@
 using System;
 using System.Diagnostics;
 using System.Net.Http;
+using System.Net.Http.Json;
 using System.Text;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using SharpestLlmStudio.Shared;
@@ -19,17 +21,27 @@ namespace SharpestLlmStudio.Runtime
         private readonly StringBuilder _serverStderr = new();
         private readonly StringBuilder _serverStdout = new();
 
-        public bool IsServerRunning => this._serverProcess != null && !this._serverProcess.HasExited;
+        public bool IsServerRunning => (this._serverProcess != null && !this._serverProcess.HasExited) || !string.IsNullOrWhiteSpace(this._currentBaseUrl);
         public string CurrentBaseUrl => this._currentBaseUrl;
 
         public async Task<LlamaModelLoadResult> LoadModelAsync(LlamaModelLoadRequest request, CancellationToken cancellationToken = default)
         {
-            if (this._settings.KillExistingServerInstancesBeforeLoad)
+            string targetBaseUrl = $"http://{request.Host}:{request.Port}";
+
+            if (this._settings.KillExistingServerInstances)
             {
                 int killed = this.KillAllLlamaServerExeInstances() ?? 0;
                 if (killed > 0)
                 {
                     await StaticLogger.LogAsync($"[LlamaCpp] Killed {killed} existing llama-server.exe instance(s) before loading new model.");
+                }
+            }
+            else
+            {
+                var reused = await TryReuseExistingInstanceAsync(targetBaseUrl, request.ContextSize, cancellationToken);
+                if (reused != null)
+                {
+                    return reused;
                 }
             }
 
@@ -47,7 +59,9 @@ namespace SharpestLlmStudio.Runtime
                 // 2. Argumente zusammenbauen
                 var args = $"-m \"{request.ModelInfo.ModelFilePath}\" -ngl {request.GpuLayers} -c {request.ContextSize} --host {request.Host} --port {request.Port}";
 
-                if (request.IncludeMmproj && !string.IsNullOrEmpty(request.ModelInfo.MmprojFilePath))
+                // For Omni models, always include vision/encoder gguf as --mmproj if available
+                bool shouldIncludeMmproj = request.IncludeMmproj || request.ModelInfo.IsOmni;
+                if (shouldIncludeMmproj && !string.IsNullOrEmpty(request.ModelInfo.MmprojFilePath))
                 {
                     args += $" --mmproj \"{request.ModelInfo.MmprojFilePath}\"";
                 }
@@ -59,10 +73,10 @@ namespace SharpestLlmStudio.Runtime
 
                 // Enable embedding endpoint for knowledge base vectorization
                 // NOTE: --embedding conflicts with multimodal (VL/mmproj) models — only enable when no mmproj is loaded
-                bool hasMmproj = request.IncludeMmproj && !string.IsNullOrEmpty(request.ModelInfo.MmprojFilePath);
+                bool hasMmproj = shouldIncludeMmproj && !string.IsNullOrEmpty(request.ModelInfo.MmprojFilePath);
                 if (!hasMmproj)
                 {
-                    args += " --embedding";
+                    args += " --embedding --pooling mean";
                 }
 
                 // Enable slot save/restore for context management
@@ -70,6 +84,28 @@ namespace SharpestLlmStudio.Runtime
 
                 // Prüfen ob Executable existiert
                 var exePath = ResolveExecutablePath(request.ServerExecutablePath);
+
+                // Special case for Omni/MiniCPM-o or multi-file models: Use omni server
+                var modelDir = request.ModelInfo.ModelRootDirectory;
+                int ggufCount = Directory.Exists(modelDir) ? Directory.GetFiles(modelDir, "*.gguf", SearchOption.AllDirectories).Length : 0;
+
+                if (request.ModelInfo.IsOmni ||
+                    request.ModelInfo.Name.Contains("MiniCPM", StringComparison.OrdinalIgnoreCase) ||
+                    request.ModelInfo.ModelFilePath.Contains("MiniCPM", StringComparison.OrdinalIgnoreCase) ||
+                    ggufCount > 2)
+                {
+                    var omniPath = Path.Combine(Path.GetDirectoryName(request.ServerExecutablePath) ?? string.Empty, "llama.cpp-omni", "build", "bin", "llama-server.exe");
+                    if (File.Exists(omniPath))
+                    {
+                        exePath = omniPath;
+                        await StaticLogger.LogAsync($"[LlamaCpp] Special model detected (MiniCPM or {ggufCount} GGUFs): Using Omni-Server at {exePath}");
+                    }
+                    else
+                    {
+                        await StaticLogger.LogAsync($"[LlamaCpp] WARNING: MiniCPM/Multi-file model detected, but Omni-Server not found at '{omniPath}'. Falling back to default.");
+                    }
+                }
+
                 await StaticLogger.LogAsync($"[LlamaCpp] Resolved executable: {exePath}");
 
                 if (!File.Exists(exePath))
@@ -122,7 +158,7 @@ namespace SharpestLlmStudio.Runtime
                 this._serverProcess.BeginOutputReadLine();
 
                 await StaticLogger.LogAsync($"[LlamaCpp] Process started (PID {this._serverProcess.Id}). Waiting for health endpoint...");
-                this._currentBaseUrl = $"http://{request.Host}:{request.Port}";
+                this._currentBaseUrl = targetBaseUrl;
 
                 // 4. Warten, bis der Server hochgefahren und das Modell im VRAM ist
                 bool isReady = await this.WaitForServerReadyAsync(this._currentBaseUrl, TimeSpan.FromMinutes(2), cancellationToken);
@@ -170,6 +206,71 @@ namespace SharpestLlmStudio.Runtime
                     msg += $"\n{serverOutput}";
                 }
                 return new LlamaModelLoadResult { Success = false, ErrorMessage = msg, LoadTime = stopwatch.Elapsed };
+            }
+        }
+
+        public Task<LlamaModelLoadResult?> TryAttachToRunningServerAsync(string host = "127.0.0.1", int port = 8080, int contextSize = 4096, CancellationToken cancellationToken = default)
+        {
+            string baseUrl = $"http://{host}:{port}";
+            return this.TryReuseExistingInstanceAsync(baseUrl, contextSize, cancellationToken);
+        }
+
+        private async Task<LlamaModelLoadResult?> TryReuseExistingInstanceAsync(string baseUrl, int contextSize, CancellationToken cancellationToken)
+        {
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                cts.CancelAfter(TimeSpan.FromSeconds(3));
+
+                using var healthResponse = await this._httpClient.GetAsync($"{baseUrl}/health", cts.Token);
+                if (!healthResponse.IsSuccessStatusCode)
+                {
+                    return null;
+                }
+
+                this._currentBaseUrl = baseUrl;
+                this.CurrentContextSize = contextSize;
+                string? activeModelId = await this.TryGetActiveModelIdAsync(baseUrl, cts.Token);
+
+                await StaticLogger.LogAsync($"[LlamaCpp] Existing llama-server instance detected at {baseUrl}. Reusing it instead of starting a new process.");
+
+                return new LlamaModelLoadResult
+                {
+                    Success = true,
+                    BaseApiUrl = baseUrl,
+                    LoadTime = TimeSpan.Zero,
+                    ReusedExistingInstance = true,
+                    ActiveModelId = activeModelId
+                };
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private async Task<string?> TryGetActiveModelIdAsync(string baseUrl, CancellationToken cancellationToken)
+        {
+            try
+            {
+                using var response = await this._httpClient.GetAsync($"{baseUrl}/v1/models", cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                {
+                    return null;
+                }
+
+                var json = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken);
+                var data = json?["data"]?.AsArray();
+                if (data == null || data.Count == 0)
+                {
+                    return null;
+                }
+
+                return data[0]?["id"]?.GetValue<string>();
+            }
+            catch
+            {
+                return null;
             }
         }
 
@@ -277,7 +378,7 @@ namespace SharpestLlmStudio.Runtime
         {
             this.UnloadModel();
 
-            if (this._settings.KillExistingServerInstancesBeforeLoad)
+            if (this._settings.KillExistingServerInstances)
             {
                 try
                 {

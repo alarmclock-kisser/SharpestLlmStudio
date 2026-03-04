@@ -155,6 +155,7 @@ namespace SharpestLlmStudio.Runtime
                 {
                     GenerationStarted = this.LastGenerationStats.GenerationStarted,
                     GenerationFinished = this.LastGenerationStats.GenerationFinished,
+                    TimeTilFirstToken = this.LastGenerationStats.TimeTilFirstToken,
                     TotalTokensGenerated = this.LastGenerationStats.TotalTokensGenerated,
                     UsedWattsApprox = this.LastGenerationStats.UsedWattsApprox,
                     TotalContextTokens = this.LastGenerationStats.TotalContextTokens,

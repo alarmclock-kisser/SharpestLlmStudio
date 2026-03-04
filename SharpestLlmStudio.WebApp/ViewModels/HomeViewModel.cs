@@ -31,15 +31,15 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public int DirectMlDeviceIndex => this.DirectMlDevices != null && this.SelectedDirectMlDevice != null ? this.DirectMlDevices.ToList().IndexOf(this.SelectedDirectMlDevice) -1 : -1;
         public string? SelectedModelName { get; set; } = null;
 
-        public static readonly IReadOnlyList<string> ModelSortOptions = ["Alphabetical", "Size", "Parameters", "Newest"];
+        public static readonly IReadOnlyList<string> ModelSortOptions = ["A - Z", "Biggest", "Params", "Newest", "Vision"];
 
-        private string modelSortMode = "Alphabetical";
+        private string modelSortMode = "A - Z";
         public string ModelSortMode
         {
             get => this.modelSortMode;
             set
             {
-                this.modelSortMode = value ?? "Alphabetical";
+                this.modelSortMode = value ?? "A - Z";
                 // keep index in sync
                 var idx = ModelSortOptions.ToList().IndexOf(this.modelSortMode);
                 this.ModelSortIndex = idx >= 0 ? idx : 0;
@@ -83,6 +83,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public string ModelLoadingTimeString { get; set; } = "No model loaded yet.";
         public string? LastLoadError { get; set; } = null;
         public bool IsLoaded { get; set; } = false;
+        public bool IsReusedInstance { get; set; } = false;
         public bool IsBusy { get; set; } = false;
         public bool IsImagePathsExpanded { get; set; } = false;
         public List<string> SelectedImagePaths { get; private set; } = [];
@@ -279,6 +280,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public string KnowledgeQuery { get; set; } = string.Empty;
         public int KnowledgeTopK { get; set; } = 3;
         public IReadOnlyList<LlamaKnowledgeSearchResult> KnowledgeResults { get; private set; } = [];
+        public IReadOnlyList<SharpestLlmStudio.Runtime.LlamaKnowledgeEntry> KnowledgeEntries { get; private set; } = [];
 
         public string? LastActionMessage { get; set; } = null;
         public bool MonitoringEnabled => this.Settings.EnableMonitoring;
@@ -336,6 +338,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
 
         public bool FirstRender { get; private set; } = true;
+        private bool selectDefaultModelAfterReusedUnload;
 
 
         public HomeViewModel(LlamaCppClient ApiClient, IJSRuntime js, WebAppSettings webAppSettings)
@@ -359,7 +362,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                         try { this.NotifyStateChanged?.Invoke(); } catch { }
                     }
                     catch { }
-                }, null, 0, Math.Max(200, this.AutoRefreshIntervalMs));
+                }, null, 0, Math.Max(100, this.AutoRefreshIntervalMs));
             }
             catch { }
         }
@@ -403,6 +406,30 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             await this.RefreshContextAsync();
             this.SyncChatMessagesFromClient();
 
+            if (!this.Settings.KillExistingServerInstances)
+            {
+                try
+                {
+                    var attachResult = await this.Client.TryAttachToRunningServerAsync(contextSize: this.ContextSize);
+                    if (attachResult?.Success == true)
+                    {
+                        this.IsLoaded = true;
+                        this.LoadedModel = ResolveModelFromServerId(attachResult.ActiveModelId) ?? this.LlamaModels.FirstOrDefault(m => m.Name.Equals(this.SelectedModelName, StringComparison.OrdinalIgnoreCase));
+                        this.IsReusedInstance = true;
+                        if (this.LoadedModel != null)
+                        {
+                            this.SelectedModelName = this.LoadedModel.Name;
+                        }
+
+                        this.ModelLoadingTimeString = "Attached to existing llama-server instance.";
+                        this.LastActionMessage = "Existing llama-server instance detected and reused.";
+                    }
+                }
+                catch
+                {
+                }
+            }
+
             if (this.AutoRefreshEnabled)
             {
                 this.StartAutoRefresh();
@@ -420,11 +447,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     this.SelectedContextFilePath = null;
                 }
 
-                if (string.IsNullOrWhiteSpace(this.SelectedContextFilePath) && this.ContextFiles.Count > 0)
-                {
-                    this.SelectedContextFilePath = this.ContextFiles.First();
-                }
-
+                // Intentionally do NOT auto-select the first saved context.
+                // App should start in a fresh/volatile context unless user explicitly selects one.
                 this.IsCurrentContextSaved = !string.IsNullOrWhiteSpace(this.SelectedContextFilePath);
             }
             catch
@@ -616,6 +640,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.generationCts = new CancellationTokenSource();
 
             string prompt = this.UserInput.Trim();
+            string promptForGeneration = prompt;
             string assistantText = string.Empty;
 
             this.IsGenerating = true;
@@ -641,9 +666,23 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             try
             {
+                // Automatically augment prompt with knowledge context when available
+                if (this.KnowledgeEntries.Count > 0)
+                {
+                    try
+                    {
+                        promptForGeneration = await this.Client.BuildKnowledgeAugmentedPromptAsync(prompt, this.KnowledgeTopK, this.generationCts.Token);
+                    }
+                    catch (Exception ex)
+                    {
+                        await StaticLogger.LogAsync(ex, "[HomeViewModel] Could not augment prompt with knowledge context");
+                        promptForGeneration = prompt;
+                    }
+                }
+
                 LlamaGenerationRequest request = new()
                 {
-                    Prompt = prompt,
+                    Prompt = promptForGeneration,
                     Images = this.SelectedImagePaths.ToArray(),
                     Isolated = this.IsolatedGeneration,
                     PersistConversation = !this.IsolatedGeneration,
@@ -654,6 +693,13 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     Stream = true,
                     SystemPrompt = this.UseSystemPrompt ? this.SystemPrompt : null
                 };
+
+                // Clear image attachments immediately after capturing them for the request
+                // so they are not re-sent on subsequent prompts
+                this.SelectedImagePaths.Clear();
+                this.loadedImageMetadata.Clear();
+                this.ImageEstimatedTokensTotal = 0;
+                this.RequestUiRefresh();
 
                 await foreach (var chunk in this.Client.GenerateAsync(request, this.generationCts.Token))
                 {
@@ -669,7 +715,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
                 if (this.AutoSaveEnabled && !this.IsolatedGeneration && this.HasSavedContextBaseline)
                 {
-                    string saveName = Path.GetFileNameWithoutExtension(this.SelectedContextFilePath) ?? this.ContextSaveName;
+                    string saveName = NormalizeContextSaveName(Path.GetFileNameWithoutExtension(this.SelectedContextFilePath) ?? this.ContextSaveName);
                     var saveResult = await this.Client.SaveContextAsync(saveName);
                     this.IsCurrentContextSaved = saveResult.Success;
                     if (saveResult.Success)
@@ -724,12 +770,20 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.LlamaModels = this.Client.Models.ToList();
             this.ApplyModelSort();
 
+            if (!this.IsLoaded && this.selectDefaultModelAfterReusedUnload)
+            {
+                this.SelectDefaultModelFromSettings();
+                this.selectDefaultModelAfterReusedUnload = false;
+            }
+
             if (this.FirstRender)
             {
                 // this.DirectMlDevices = await this.Client.GetDirectMlDevicesAsync();
                 this.ContextSize = this.Settings.DefaultContextSize;
 
-                this.SelectedModelName = this.LlamaModels.FirstOrDefault()?.Name;
+                this.SelectedModelName = this.LlamaModels.FirstOrDefault(m => m.Name.Equals(this.Settings.DefaultModel, StringComparison.OrdinalIgnoreCase))?.Name
+                    ?? this.LlamaModels.FirstOrDefault(m => m.Name.Contains(this.Settings.DefaultModel, StringComparison.OrdinalIgnoreCase))?.Name
+                    ?? this.LlamaModels.FirstOrDefault()?.Name;
 
                 this.GenMaxTokens = this.Settings.DefaultMaxTokens;
                 this.GenTemperature = (float) this.Settings.DefaultTemperature;
@@ -741,18 +795,43 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         private void ApplyModelSort()
         {
+            string? previousSelected = this.SelectedModelName;
+
             this.LlamaModels = this.ModelSortMode switch
             {
-                "Size" => this.LlamaModels.OrderByDescending(m => m.SizeInMb).ToList(),
-                "Parameters" => this.LlamaModels.OrderByDescending(m => m.ParametersB ?? 0).ToList(),
+                "Biggest" => this.LlamaModels.OrderByDescending(m => m.SizeInMb).ToList(),
+                "Params" => this.LlamaModels.OrderByDescending(m => m.ParametersB ?? 0).ToList(),
                 "Newest" => this.LlamaModels.OrderByDescending(m => m.LastModified).ToList(),
+                "Vision" => this.LlamaModels.OrderByDescending(m => m.IsOmni).ThenByDescending(m => File.Exists(m.MmprojFilePath)).ThenByDescending(m => m.ParametersB ?? 0).ToList(),
                 _ => this.LlamaModels.OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase).ToList()
             };
-            // After sorting, ensure the SelectedModelName points to the first model if available
+
+            // Keep loaded/reused model selected when dropdown is disabled
+            if (this.IsLoaded && this.LoadedModel != null && this.LlamaModels.Any(m => m.Name.Equals(this.LoadedModel.Name, StringComparison.OrdinalIgnoreCase)))
+            {
+                this.SelectedModelName = this.LoadedModel.Name;
+                return;
+            }
+
+            // Preserve previous selection if still present
+            if (!string.IsNullOrWhiteSpace(previousSelected) && this.LlamaModels.Any(m => m.Name.Equals(previousSelected, StringComparison.OrdinalIgnoreCase)))
+            {
+                this.SelectedModelName = previousSelected;
+                return;
+            }
+
+            // Fallback to first model if nothing is selected
             if (this.LlamaModels.FirstOrDefault() is LlamaModelInfo first)
             {
                 this.SelectedModelName = first.Name;
             }
+        }
+
+        private void SelectDefaultModelFromSettings()
+        {
+            this.SelectedModelName = this.LlamaModels.FirstOrDefault(m => m.Name.Equals(this.Settings.DefaultModel, StringComparison.OrdinalIgnoreCase))?.Name
+                ?? this.LlamaModels.FirstOrDefault(m => m.Name.Contains(this.Settings.DefaultModel, StringComparison.OrdinalIgnoreCase))?.Name
+                ?? this.LlamaModels.FirstOrDefault()?.Name;
         }
 
         private async Task<List<byte[]>> LoadSelectedImageBytesAsync(CancellationToken ct)
@@ -953,6 +1032,23 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             };
         }
 
+        private static string NormalizeContextSaveName(string input)
+        {
+            string name = input?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return "session";
+            }
+
+            // Prevent growth like "Name.chat.chat.chat" during autosave cycles.
+            while (name.EndsWith(".chat", StringComparison.OrdinalIgnoreCase))
+            {
+                name = name[..^5];
+            }
+
+            return string.IsNullOrWhiteSpace(name) ? "session" : name;
+        }
+
         public async Task SaveContextAsync()
         {
             var result = await this.Client.SaveContextAsync(this.ContextSaveName);
@@ -1021,6 +1117,9 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.LastActionMessage = $"Knowledge upserted: {this.KnowledgeKey.Trim()}";
             this.KnowledgeKey = string.Empty;
             this.KnowledgeContent = string.Empty;
+
+            // Refresh local snapshot for UI
+            try { this.KnowledgeEntries = this.Client.GetKnowledgeEntriesSnapshot(); } catch { this.KnowledgeEntries = []; }
             this.RequestUiRefresh();
         }
 
@@ -1059,6 +1158,9 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.LastActionMessage = added > 0
                 ? $"Imported {added} knowledge file(s)."
                 : "No knowledge files were imported.";
+
+            // Refresh local snapshot for UI
+            try { this.KnowledgeEntries = this.Client.GetKnowledgeEntriesSnapshot(); } catch { this.KnowledgeEntries = []; }
             this.RequestUiRefresh();
         }
 
@@ -1071,10 +1173,19 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 return;
             }
 
-            this.KnowledgeResults = await this.Client.SearchKnowledgeAsync(this.KnowledgeQuery.Trim(), this.KnowledgeTopK);
-            this.LastActionMessage = this.KnowledgeResults.Count == 0
-                ? "No matching knowledge entries found."
-                : $"Found {this.KnowledgeResults.Count} matching knowledge entries.";
+            try
+            {
+                this.KnowledgeResults = await this.Client.SearchKnowledgeAsync(this.KnowledgeQuery.Trim(), this.KnowledgeTopK);
+                this.LastActionMessage = this.KnowledgeResults.Count == 0
+                    ? "No matching knowledge entries found."
+                    : $"Found {this.KnowledgeResults.Count} matching knowledge entries.";
+            }
+            catch (Exception ex)
+            {
+                this.KnowledgeResults = [];
+                this.LastActionMessage = "Knowledge search failed.";
+                await StaticLogger.LogAsync(ex, "[HomeViewModel] Error while searching knowledge");
+            }
 
             this.RequestUiRefresh();
         }
@@ -1104,9 +1215,13 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             // Server is gone — reset loaded state
             this.IsLoaded = false;
             this.LoadedModel = null;
+            this.IsGenerating = false;
+            this.LastGenerationStats = null;
             this.ModelLoadingTimeString = "Model unloaded (killed).";
             this.IsModelPanelExpanded = true;
 
+            // Clear reused-instance flag because we killed servers
+            this.IsReusedInstance = false;
             this.RequestUiRefresh();
             return Task.CompletedTask;
         }
@@ -1168,8 +1283,21 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 {
                     // Unload
                     await StaticLogger.LogAsync("[Blazor] Unloading model...");
-                    this.Client.UnloadModel();
+
+                    if (this.IsReusedInstance)
+                    {
+                        // Reused external instance cannot be unloaded in-place via tracked process handle.
+                        // Kill server process(es) to actually release RAM/VRAM.
+                        _ = this.Client.KillAllLlamaServerExeInstances();
+                        this.selectDefaultModelAfterReusedUnload = true;
+                    }
+                    else
+                    {
+                        this.Client.UnloadModel();
+                    }
+
                     this.IsLoaded = false;
+                    this.IsReusedInstance = false;
                     this.LoadedModel = null;
                     this.ModelLoadingTimeString = "Model unloaded.";
                     this.IsModelPanelExpanded = true;
@@ -1211,11 +1339,25 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
                     if (response.Success)
                     {
-                        this.ModelLoadingTimeString = $"{sw.Elapsed.TotalSeconds:F3} sec. elapsed loading.";
+                        this.ModelLoadingTimeString = response.ReusedExistingInstance
+                            ? "Attached to existing llama-server instance."
+                            : $"{sw.Elapsed.TotalSeconds:F3} sec. elapsed loading.";
                         this.IsLoaded = true;
-                        this.LoadedModel = modelToLoad;
+                        this.IsReusedInstance = response.ReusedExistingInstance;
+                        this.LoadedModel = response.ReusedExistingInstance
+                            ? (ResolveModelFromServerId(response.ActiveModelId) ?? modelToLoad)
+                            : modelToLoad;
+                        if (this.LoadedModel != null)
+                        {
+                            this.SelectedModelName = this.LoadedModel.Name;
+                        }
                         this.IsModelPanelExpanded = true;
                         await StaticLogger.LogAsync($"[Blazor] Model loaded successfully in {sw.Elapsed.TotalSeconds:F3}s — API at {response.BaseApiUrl}");
+
+                        if (response.ReusedExistingInstance)
+                        {
+                            this.LastActionMessage = "An existing llama-server instance was already running and is now reused.";
+                        }
 
                         _ = Task.Run(async () =>
                         {
@@ -1250,6 +1392,27 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 await this.RefreshAsync();
                 this.RequestUiRefresh();
             }
+        }
+
+        private LlamaModelInfo? ResolveModelFromServerId(string? activeModelId)
+        {
+            if (string.IsNullOrWhiteSpace(activeModelId))
+            {
+                return null;
+            }
+
+            string raw = activeModelId.Trim();
+            string fileName = Path.GetFileName(raw);
+            string fileNameNoExt = Path.GetFileNameWithoutExtension(raw);
+
+            return this.LlamaModels.FirstOrDefault(m =>
+                m.Name.Equals(raw, StringComparison.OrdinalIgnoreCase) ||
+                m.Name.Equals(fileNameNoExt, StringComparison.OrdinalIgnoreCase) ||
+                m.Name.Contains(fileNameNoExt, StringComparison.OrdinalIgnoreCase) ||
+                fileNameNoExt.Contains(m.Name, StringComparison.OrdinalIgnoreCase) ||
+                Path.GetFileName(m.ModelFilePath).Equals(fileName, StringComparison.OrdinalIgnoreCase) ||
+                Path.GetFileNameWithoutExtension(m.ModelFilePath).Equals(fileNameNoExt, StringComparison.OrdinalIgnoreCase) ||
+                m.ModelFilePath.Contains(raw, StringComparison.OrdinalIgnoreCase));
         }
 
 
