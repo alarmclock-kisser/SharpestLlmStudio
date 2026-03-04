@@ -219,6 +219,65 @@
     padding: 0.5rem;
 }
 
+.knowledge-entries-list {
+    max-height: 260px;
+    overflow: auto;
+    padding: 0.2rem;
+}
+
+.knowledge-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.knowledge-file {
+    border: 1px solid var(--rz-base-300);
+    border-radius: 6px;
+    margin-bottom: 0.4rem;
+    padding: 0.35rem;
+    background: rgba(0,0,0,0.02);
+}
+
+.file-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.file-title {
+    font-weight: 700;
+}
+
+.file-actions {
+}
+
+.delete-knowledge {
+    background: transparent;
+    border: none;
+    color: var(--rz-danger, #d32f2f);
+    font-size: 1.1rem;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    cursor: pointer;
+}
+
+.delete-knowledge:hover { background: rgba(0,0,0,0.06); }
+
+.chunk-list { margin-top: 0.35rem; }
+
+.chunk-items { padding: 0.25rem 0.5rem; max-height: 160px; overflow: auto; }
+
+.chunk-item { padding: 0.25rem 0; border-bottom: 1px dashed var(--rz-base-300); }
+
+.chunk-item:last-child { border-bottom: none; }
+
+.chunk-header { font-size: 0.82rem; font-weight: 600; }
+
+.chunk-preview { font-size: 0.82rem; color: var(--rz-text-secondary-color); white-space: pre-wrap; }
+
 .knowledge-item {
     padding: 0.45rem 0.35rem;
     border-bottom: 1px dotted var(--rz-base-400);

@@ -177,6 +177,9 @@ namespace SharpestLlmStudio.Shared
         // Context Size (-c). Wie viele Token das Modell sich merken kann.
         public int ContextSize { get; set; } = 4096;
 
+        // Batch Size (-b). Tokens, die pro Decode-Schritt gemeinsam verarbeitet werden.
+        public int BatchSize { get; set; } = 512;
+
         // Multimodal Projection mitladen?
         public bool IncludeMmproj { get; set; } = true;
 

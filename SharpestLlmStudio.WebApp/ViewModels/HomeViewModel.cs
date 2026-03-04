@@ -8,6 +8,8 @@ using System.Diagnostics;
 using SharpestLlmStudio.Shared;
 using SharpestLlmStudio.Runtime;
 using System.Runtime.Versioning;
+using System.Net;
+using System.Text.RegularExpressions;
 
 namespace SharpestLlmStudio.WebApp.ViewModels
 {
@@ -72,6 +74,30 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public bool UseSystemPrompt { get; set; } = true;
         public bool IsolatedGeneration { get; set; } = false;
         public bool AutoSaveEnabled { get; set; } = true;
+
+        private bool useJsonOutputFormat;
+        public bool UseJsonOutputFormat
+        {
+            get => this.useJsonOutputFormat;
+            set
+            {
+                if (value && !this.HasJsonOutputFormat)
+                {
+                    this.useJsonOutputFormat = false;
+                    this.JsonOutputFormatWarning = "JSON output format is enabled, but no valid JSON format file is loaded.";
+                    this.RequestUiRefresh();
+                    return;
+                }
+
+                this.useJsonOutputFormat = value;
+                this.RequestUiRefresh();
+            }
+        }
+
+        public string JsonOutputFormatTemplate { get; private set; } = string.Empty;
+        public string? JsonOutputFormatFileName { get; private set; }
+        public string? JsonOutputFormatWarning { get; private set; }
+        public bool HasJsonOutputFormat => !string.IsNullOrWhiteSpace(this.JsonOutputFormatTemplate);
 
         public ICollection<string> ContextFiles { get; private set; } = [];
         public bool IsCurrentContextSaved { get; private set; } = false;
@@ -280,7 +306,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public string KnowledgeQuery { get; set; } = string.Empty;
         public int KnowledgeTopK { get; set; } = 3;
         public IReadOnlyList<LlamaKnowledgeSearchResult> KnowledgeResults { get; private set; } = [];
-        public IReadOnlyList<SharpestLlmStudio.Runtime.LlamaKnowledgeEntry> KnowledgeEntries { get; private set; } = [];
+        public IReadOnlyList<LlamaKnowledgeEntry> KnowledgeEntries { get; private set; } = [];
 
         public string? LastActionMessage { get; set; } = null;
         public bool MonitoringEnabled => this.Settings.EnableMonitoring;
@@ -333,9 +359,58 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         public float GenTemperature { get; set; } = 0.7f;
         public int GenMaxTokens { get; set; } = 512;
+        private decimal genRepetitionPenalty = 1.1m;
+        public decimal GenRepetitionPenalty
+        {
+            get => this.genRepetitionPenalty;
+            set
+            {
+                this.genRepetitionPenalty = value;
+                this.RequestUiRefresh();
+            }
+        }
         public float GenTopP { get; set; } = 0.9f;
 
+        // Panel persistence constants
+        public const string ModelExpandedStorageKey = "home.model.expanded";
+        public const string ContextExpandedStorageKey = "home.context.expanded";
+        public const string KnowledgeExpandedStorageKey = "home.knowledge.expanded";
+        public const string GenSettingsExpandedStorageKey = "home.gensettings.expanded";
+        public const string ChatOutputElementId = "chat-output";
 
+        // UI state tracking (moved from Razor @code)
+        private bool? _lastLoadedState;
+        private int _lastChatMessageCount;
+        private bool _panelStateLoaded;
+        public bool ImageAttachmentsExpanded { get; set; } = true;
+        public bool GenSettingsExpanded { get; set; } = false;
+
+        // Computed properties (moved from Razor @code)
+        public LlamaModelInfo? SelectedModelInfo => this.LlamaModels.FirstOrDefault(m => m.Name == this.SelectedModelName);
+        public bool HasMmproj => this.SelectedModelInfo?.MmprojFilePath != null;
+        public bool IsSelectedOmni => this.SelectedModelInfo?.IsOmni == true;
+
+        public string MmprojLabel => this.IsSelectedOmni
+            ? "Model is Any-to-Any (Omni)"
+            : this.HasMmproj
+                ? "Load multimodal projection (mmproj)"
+                : "Multimodal projection \u2013 not available for this model";
+
+        public string GenerationStatsSummary
+        {
+            get
+            {
+                var stats = this.LastGenerationStats;
+                if (stats == null)
+                {
+                    return "";
+                }
+
+                string total = stats.TotalGenerationTime.HasValue ? $"{stats.TotalGenerationTime.Value.TotalSeconds:F1}s" : "-";
+                string ttft = stats.TimeTilFirstToken > 0 ? $"{stats.TimeTilFirstToken:F3}s" : "-";
+                return $"(tok: {stats.TotalTokensGenerated} | tok/s: {stats.TokensPerSecond:F3} | TTFT: {ttft} | total: {total}) [{stats.TotalContextTokens} of {stats.ContextSize} tokens used]";
+            }
+        }
 
         public bool FirstRender { get; private set; } = true;
         private bool selectDefaultModelAfterReusedUnload;
@@ -410,7 +485,9 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 try
                 {
-                    var attachResult = await this.Client.TryAttachToRunningServerAsync(contextSize: this.ContextSize);
+                    var attachResult = await this.Client.TryAttachToRunningServerAsync(
+                        contextSize: this.ContextSize,
+                        batchSize: Math.Max(1, this.Settings.DefaultBatchSize));
                     if (attachResult?.Success == true)
                     {
                         this.IsLoaded = true;
@@ -463,7 +540,11 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.Client.ResetConversation();
             this.GeneratedOutput = string.Empty;
             this.ChatMessages = [];
+            // When resetting the conversation, clear any saved-context selection and
+            // the save-name so autosave does not unintentionally overwrite an existing file.
             this.IsCurrentContextSaved = false;
+            this.SelectedContextFilePath = null;
+            this.ContextSaveName = string.Empty;
             await this.RefreshContextAsync();
             try { this.NotifyStateChanged?.Invoke(); } catch { }
         }
@@ -627,6 +708,51 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.RequestUiRefresh();
         }
 
+        public async Task LoadJsonOutputFormatAsync(IBrowserFile file, CancellationToken cancellationToken = default)
+        {
+            if (file == null)
+            {
+                return;
+            }
+
+            try
+            {
+                using var stream = file.OpenReadStream(5 * 1024 * 1024, cancellationToken);
+                using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                string content = await reader.ReadToEndAsync(cancellationToken);
+
+                this.JsonOutputFormatFileName = file.Name;
+
+                if (!StaticLogics.TryFormatJson(content, out string formattedJson))
+                {
+                    this.JsonOutputFormatTemplate = string.Empty;
+                    this.UseJsonOutputFormat = false;
+                    this.JsonOutputFormatWarning = $"Invalid JSON format in '{file.Name}'. JSON output format was not enabled.";
+                    this.LastActionMessage = this.JsonOutputFormatWarning;
+                    await StaticLogger.LogAsync($"[HomeViewModel] Invalid JSON output format file '{file.Name}'. Validation failed.");
+                    this.RequestUiRefresh();
+                    return;
+                }
+
+                this.JsonOutputFormatTemplate = formattedJson;
+                this.UseJsonOutputFormat = true;
+                this.JsonOutputFormatWarning = null;
+                this.LastActionMessage = $"JSON output format loaded: {file.Name}";
+
+                await StaticLogger.LogAsync($"[HomeViewModel] JSON output format loaded and validated from '{file.Name}'.");
+            }
+            catch (Exception ex)
+            {
+                this.JsonOutputFormatTemplate = string.Empty;
+                this.UseJsonOutputFormat = false;
+                this.JsonOutputFormatWarning = $"Failed to read JSON format file '{file.Name}': {ex.Message}";
+                this.LastActionMessage = this.JsonOutputFormatWarning;
+                await StaticLogger.LogAsync(ex, "[HomeViewModel] Could not load JSON output format file");
+            }
+
+            this.RequestUiRefresh();
+        }
+
         [SupportedOSPlatform("windows")]
         public async Task StartGenerationAsync()
         {
@@ -646,6 +772,11 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.IsGenerating = true;
             this.GeneratedOutput = string.Empty;
             this.LastLoadError = null;
+
+            if (this.UseJsonOutputFormat)
+            {
+                this.JsonOutputFormatWarning = null;
+            }
 
             var generationStats = new GenerationStats
             {
@@ -671,7 +802,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 {
                     try
                     {
-                        promptForGeneration = await this.Client.BuildKnowledgeAugmentedPromptAsync(prompt, this.KnowledgeTopK, this.generationCts.Token);
+                        promptForGeneration = await this.Client.BuildKnowledgeAugmentedPromptAsync(prompt, this.KnowledgeTopK, this.ContextSize, this.GenMaxTokens, this.generationCts.Token);
                     }
                     catch (Exception ex)
                     {
@@ -689,9 +820,10 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     IncludeConversationHistory = !this.IsolatedGeneration,
                     MaxTokens = this.GenMaxTokens,
                     Temperature = this.GenTemperature,
+                    RepetitionPenalty = (double)this.GenRepetitionPenalty,
                     TopP = this.GenTopP,
                     Stream = true,
-                    SystemPrompt = this.UseSystemPrompt ? this.SystemPrompt : null
+                    SystemPrompt = this.BuildEffectiveSystemPrompt()
                 };
 
                 // Clear image attachments immediately after capturing them for the request
@@ -729,7 +861,19 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     this.IsCurrentContextSaved = false;
                 }
 
-                this.LastActionMessage = "Generation finished.";
+                bool expectedJsonOutput = this.UseJsonOutputFormat && this.HasJsonOutputFormat;
+                bool receivedValidJsonOutput = StaticLogics.TryFormatJson(assistantText, out _);
+
+                if (expectedJsonOutput && !receivedValidJsonOutput)
+                {
+                    this.JsonOutputFormatWarning = "Expected strict JSON output, but model response is not valid JSON.";
+                    this.LastActionMessage = "Generation finished (warning: invalid JSON response).";
+                    await StaticLogger.LogAsync("[HomeViewModel] JSON output mode enabled, but response validation failed.");
+                }
+                else
+                {
+                    this.LastActionMessage = "Generation finished.";
+                }
 
                 // Sync UI chat messages from client — ring buffer may have trimmed oldest messages
                 this.SyncChatMessagesFromClient();
@@ -787,6 +931,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
                 this.GenMaxTokens = this.Settings.DefaultMaxTokens;
                 this.GenTemperature = (float) this.Settings.DefaultTemperature;
+                this.GenRepetitionPenalty = (decimal)this.Settings.DefaultRepetitionPenalty;
 
 
                 this.FirstRender = false;
@@ -1205,6 +1350,51 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.RequestUiRefresh();
         }
 
+        public async Task DeleteKnowledgeByKeyAsync(string baseKey)
+        {
+            if (string.IsNullOrWhiteSpace(baseKey))
+            {
+                return;
+            }
+
+            try
+            {
+                var snapshot = this.Client.GetKnowledgeEntriesSnapshot().ToList();
+                var remaining = snapshot.Where(k =>
+                    {
+                        var idx = k.Key.IndexOf(" [chunk ", StringComparison.OrdinalIgnoreCase);
+                        var bk = idx >= 0 ? k.Key.Substring(0, idx) : k.Key;
+                        return !string.Equals(bk, baseKey, StringComparison.OrdinalIgnoreCase);
+                    }).ToList();
+
+                // Rebuild store: clear then re-insert remaining knowledge grouped by base key
+                this.Client.ClearKnowledgeStore();
+
+                var groups = remaining.GroupBy(k =>
+                {
+                    var idx = k.Key.IndexOf(" [chunk ", StringComparison.OrdinalIgnoreCase);
+                    return idx >= 0 ? k.Key.Substring(0, idx) : k.Key;
+                });
+
+                foreach (var g in groups)
+                {
+                    string key = g.Key;
+                    string combined = string.Join("\n\n", g.Select(x => x.Content ?? string.Empty));
+                    string? source = g.Select(x => x.SourcePath).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p));
+                    await this.Client.UpsertKnowledgeAsync(key, combined, source);
+                }
+
+                // Refresh local snapshot
+                this.KnowledgeEntries = this.Client.GetKnowledgeEntriesSnapshot();
+                this.LastActionMessage = $"Removed knowledge: {baseKey}";
+                this.RequestUiRefresh();
+            }
+            catch (Exception ex)
+            {
+                await StaticLogger.LogAsync(ex, "[HomeViewModel] Error deleting knowledge by key");
+            }
+        }
+
         public Task KillAllLlamaServerExeInstancesAsync()
         {
             int? killed = this.Client.KillAllLlamaServerExeInstances();
@@ -1241,13 +1431,6 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             return text.Split([' ', '\n', '\r', '\t'], StringSplitOptions.RemoveEmptyEntries).Length;
         }
 
-        private sealed class LoadedImageMetadata
-        {
-            public string FileName { get; init; } = string.Empty;
-            public int Width { get; init; }
-            public int Height { get; init; }
-            public long FileSizeBytes { get; init; }
-        }
 
         private readonly record struct ImageDisplayInfo(string Label, int EstimatedTokens);
 
@@ -1256,10 +1439,151 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             try { this.NotifyStateChanged?.Invoke(); } catch { }
         }
 
+        // ── Lifecycle methods (called from Razor OnAfterRenderAsync) ──
+
+        public async Task OnFirstRenderAsync(DotNetObjectReference<HomeViewModel> vmRef)
+        {
+            await this.InitializeAsync();
+            await this.LoadPanelStatesAsync();
+            this._panelStateLoaded = true;
+            this._lastLoadedState = this.IsLoaded;
+
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupPromptEnter", "promptInput", vmRef);
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupConditionalAutoScroll", ChatOutputElementId, 0.1);
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.autoScrollIfSticky", ChatOutputElementId);
+            this._lastChatMessageCount = this.ChatMessages.Count;
+        }
+
+        public async Task OnSubsequentRenderAsync()
+        {
+            if (this._panelStateLoaded)
+            {
+                await this.PersistPanelStatesAsync();
+            }
+
+            if (this._lastLoadedState != this.IsLoaded)
+            {
+                this._lastLoadedState = this.IsLoaded;
+                await this.PersistPanelStatesAsync();
+            }
+
+            if (this.ChatMessages.Count != this._lastChatMessageCount || this.IsGenerating)
+            {
+                this._lastChatMessageCount = this.ChatMessages.Count;
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.autoScrollIfSticky", ChatOutputElementId);
+            }
+        }
+
+        // ── Panel toggle methods ──
+
+        public async Task ToggleModelPanelAsync()
+        {
+            this.IsModelPanelExpanded = !this.IsModelPanelExpanded;
+            await this.PersistPanelStatesAsync();
+        }
+
+        public async Task ToggleContextPanelAsync()
+        {
+            this.IsContextPanelExpanded = !this.IsContextPanelExpanded;
+            await this.PersistPanelStatesAsync();
+        }
+
+        public async Task ToggleKnowledgePanelAsync()
+        {
+            this.IsKnowledgePanelExpanded = !this.IsKnowledgePanelExpanded;
+            await this.PersistPanelStatesAsync();
+        }
+
+        public async Task ToggleGenSettingsAsync()
+        {
+            this.GenSettingsExpanded = !this.GenSettingsExpanded;
+            await this.PersistPanelStatesAsync();
+        }
+
+        public void ToggleImageAttachments()
+        {
+            this.ImageAttachmentsExpanded = !this.ImageAttachmentsExpanded;
+        }
+
+        // ── Event handlers (called directly from Razor markup) ──
+
+        public void OnSelectedModelChanged()
+        {
+            this.UseMmproj = this.HasMmproj || this.IsSelectedOmni;
+        }
+
+        public async Task BrowseImagesClickAsync()
+        {
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.triggerClick", "imagePicker");
+        }
+
+        public async Task BrowseJsonFormatClickAsync()
+        {
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.triggerClick", "jsonFormatPicker");
+        }
+
+        public async Task BrowseKnowledgeFilesClickAsync()
+        {
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.triggerClick", "knowledgeFilePicker");
+        }
+
+        public async Task OnImagesSelectedAsync(InputFileChangeEventArgs args)
+        {
+            await this.AddImageUploadsAsync(args.GetMultipleFiles());
+        }
+
+        public async Task OnKnowledgeFilesSelectedAsync(InputFileChangeEventArgs args)
+        {
+            await this.AddKnowledgeFromFilesAsync(args.GetMultipleFiles());
+        }
+
+        public async Task OnJsonFormatSelectedAsync(InputFileChangeEventArgs args)
+        {
+            var file = args.GetMultipleFiles(1).FirstOrDefault();
+            if (file == null)
+            {
+                return;
+            }
+
+            await this.LoadJsonOutputFormatAsync(file);
+        }
+
+        public string RenderChatContent(string content)
+        {
+            string displayContent = StaticLogics.GetDisplayContent(content ?? string.Empty);
+            return StaticLogics.RenderMarkdownOrJson(displayContent);
+        }
+
+        // ── Panel state persistence ──
+
+        private async Task LoadPanelStatesAsync()
+        {
+            await this.Js.InvokeVoidAsync("localStorage.removeItem", ModelExpandedStorageKey);
+            await this.Js.InvokeVoidAsync("localStorage.removeItem", ContextExpandedStorageKey);
+            await this.Js.InvokeVoidAsync("localStorage.removeItem", KnowledgeExpandedStorageKey);
+            await this.Js.InvokeVoidAsync("localStorage.removeItem", GenSettingsExpandedStorageKey);
+
+            this.IsModelPanelExpanded = true;
+            this.IsContextPanelExpanded = false;
+            this.IsKnowledgePanelExpanded = false;
+            this.GenSettingsExpanded = false;
+        }
+
+        public async Task PersistPanelStatesAsync()
+        {
+            await this.Js.InvokeVoidAsync("localStorage.setItem", ModelExpandedStorageKey, this.IsModelPanelExpanded ? "1" : "0");
+            await this.Js.InvokeVoidAsync("localStorage.setItem", ContextExpandedStorageKey, this.IsContextPanelExpanded ? "1" : "0");
+            await this.Js.InvokeVoidAsync("localStorage.setItem", KnowledgeExpandedStorageKey, this.IsKnowledgePanelExpanded ? "1" : "0");
+            await this.Js.InvokeVoidAsync("localStorage.setItem", GenSettingsExpandedStorageKey, this.GenSettingsExpanded ? "1" : "0");
+        }
+
+
         public void Dispose()
         {
             this.autoRefreshTimer?.Dispose();
             this.autoRefreshTimer = null;
+
+            GC.SuppressFinalize(this);
         }
 
 
@@ -1319,6 +1643,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                         ModelInfo = modelToLoad,
                         ServerExecutablePath = this.Settings.ServerExecutablePath,
                         ContextSize = this.ContextSize,
+                        BatchSize = Math.Max(1, this.Settings.DefaultBatchSize),
                         UseFlashAttention = this.UseFlashAttention,
                         IncludeMmproj = this.UseMmproj,
                     };
@@ -1327,7 +1652,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     await StaticLogger.LogAsync($"[Blazor]   Executable : {loadRequest.ServerExecutablePath}");
                     await StaticLogger.LogAsync($"[Blazor]   ModelFile  : {modelToLoad.ModelFilePath}");
                     await StaticLogger.LogAsync($"[Blazor]   Mmproj     : {(loadRequest.IncludeMmproj ? modelToLoad.MmprojFilePath ?? "(none)" : "(disabled)")}");
-                    await StaticLogger.LogAsync($"[Blazor]   Context    : {loadRequest.ContextSize}  FlashAttn: {loadRequest.UseFlashAttention}");
+                    await StaticLogger.LogAsync($"[Blazor]   Context    : {loadRequest.ContextSize}  Batch: {loadRequest.BatchSize}  FlashAttn: {loadRequest.UseFlashAttention}");
                     if (loadRequest.UseFlashAttention && modelToLoad.IsTernaryQuantized)
                     {
                         await StaticLogger.LogAsync($"[Blazor]   NOTE: Flash Attention will be auto-disabled for ternary quantized model '{modelToLoad.Name}'.");
@@ -1394,6 +1719,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 this.IsBusy = false;
                 await this.RefreshAsync();
+                await this.PersistPanelStatesAsync();
                 this.RequestUiRefresh();
             }
         }
@@ -1417,6 +1743,31 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 Path.GetFileName(m.ModelFilePath).Equals(fileName, StringComparison.OrdinalIgnoreCase) ||
                 Path.GetFileNameWithoutExtension(m.ModelFilePath).Equals(fileNameNoExt, StringComparison.OrdinalIgnoreCase) ||
                 m.ModelFilePath.Contains(raw, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private string? BuildEffectiveSystemPrompt()
+        {
+            string? baseSystemPrompt = this.UseSystemPrompt ? this.SystemPrompt : null;
+
+            if (!this.UseJsonOutputFormat || !this.HasJsonOutputFormat)
+            {
+                return baseSystemPrompt;
+            }
+
+            const string jsonInstructionHeader =
+                "You must respond with valid JSON only. Do not output markdown, code fences, prose, or additional commentary.";
+
+            string strictFormatInstruction =
+                $"{jsonInstructionHeader}\n"
+                + "Use exactly this JSON structure (same keys and nesting):\n"
+                + this.JsonOutputFormatTemplate;
+
+            if (string.IsNullOrWhiteSpace(baseSystemPrompt))
+            {
+                return strictFormatInstruction;
+            }
+
+            return baseSystemPrompt.Trim() + "\n\n" + strictFormatInstruction;
         }
 
 
@@ -1445,12 +1796,12 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
                 if (this.LastHardwareStats?.CpuStats != null)
                 {
-                    this.AppendHistory(this.cpuUsageHistory, this.LastHardwareStats.CpuStats.AverageLoadPercentage);
+                    StaticLogics.AppendHistory(this.cpuUsageHistory, this.LastHardwareStats.CpuStats.AverageLoadPercentage);
                 }
 
                 if (this.LastHardwareStats?.GpuStats != null)
                 {
-                    this.AppendHistory(this.gpuUsageHistory, this.LastHardwareStats.GpuStats.CoreLoadPercentage);
+                    StaticLogics.AppendHistory(this.gpuUsageHistory, this.LastHardwareStats.GpuStats.CoreLoadPercentage);
                 }
             }
             catch
@@ -1461,94 +1812,15 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         public string GetCpuSparklineSvg(int width = 180, int height = 56)
         {
-            return this.GetSparklineSvg(this.cpuUsageHistory, width, height, this.SparklineCpuColor, this.GetLighterColorGradient(this.SparklineCpuColor), this.CpuManufacturerName + " CPU");
+            return StaticLogics.GetSparklineSvg(this.cpuUsageHistory, width, height, this.SparklineCpuColor, StaticLogics.GetLighterColorGradient(this.SparklineCpuColor), this.CpuManufacturerName + " CPU");
         }
 
         public string GetGpuSparklineSvg(int width = 180, int height = 56)
         {
-            return this.GetSparklineSvg(this.gpuUsageHistory, width, height, this.SparklineGpuColor, this.GetLighterColorGradient(this.SparklineGpuColor), this.GpuManufacturerName + " GPU");
+            return StaticLogics.GetSparklineSvg(this.gpuUsageHistory, width, height, this.SparklineGpuColor, StaticLogics.GetLighterColorGradient(this.SparklineGpuColor), this.GpuManufacturerName + " GPU");
         }
 
-        private string GetSparklineSvg(IEnumerable<double> valuesInput, int width, int height, string lineColor, string fillColor, string label)
-        {
-            try
-            {
-                var valsRaw = valuesInput.Select(v => Math.Clamp(v, 0.0, 100.0)).ToList();
-                if (valsRaw.Count == 0) return string.Empty;
-
-                int n = valsRaw.Count;
-                double pad = 6;
-                double innerW = Math.Max(10, width - 2 * pad);
-                double innerH = Math.Max(10, height - 2 * pad);
-
-                double min = valsRaw.Min();
-                double max = valsRaw.Max();
-                // if flat line, create a small range around value to make variations visible
-                if (Math.Abs(max - min) < 0.0001)
-                {
-                    min = Math.Max(0, min - 5);
-                    max = Math.Min(100, max + 5);
-                }
-
-                var points = new StringBuilder();
-                var area = new StringBuilder();
-                for (int i = 0; i < n; i++)
-                {
-                    double x = pad + (n == 1 ? innerW / 2.0 : i * (innerW / Math.Max(1, n - 1)));
-                    double norm = (valsRaw[i] - min) / Math.Max(1e-6, (max - min));
-                    double y = pad + (1.0 - norm) * innerH;
-                    points.AppendFormat(System.Globalization.CultureInfo.InvariantCulture, "{0},{1} ", x, y);
-                    area.AppendFormat(System.Globalization.CultureInfo.InvariantCulture, "{0},{1} ", x, y);
-                }
-
-                // build area polygon (from left-bottom, through points, to right-bottom)
-                var areaPoints = new StringBuilder();
-                areaPoints.AppendFormat(System.Globalization.CultureInfo.InvariantCulture, "{0},{1} ", pad, pad + innerH);
-                areaPoints.Append(area.ToString());
-                areaPoints.AppendFormat(System.Globalization.CultureInfo.InvariantCulture, "{0},{1}", pad + innerW, pad + innerH);
-
-                string svg = $"<svg width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\" xmlns=\"http://www.w3.org/2000/svg\">" +
-                             $"<title>{label}</title>" +
-                             $"<rect x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" rx=\"4\" ry=\"4\" fill=\"transparent\" />" +
-                             $"<line x1=\"{pad}\" y1=\"{pad + innerH}\" x2=\"{pad + innerW}\" y2=\"{pad + innerH}\" stroke=\"#d0d0d0\" stroke-width=\"1\" />" +
-                             $"<polygon fill=\"{fillColor}\" points=\"{areaPoints.ToString().Trim()}\" />" +
-                             $"<polyline fill=\"none\" stroke=\"{lineColor}\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" points=\"{points.ToString().Trim()}\" />" +
-                             $"</svg>";
-                return svg;
-            }
-            catch
-            {
-                return string.Empty;
-            }
-        }
-
-        private void AppendHistory(Queue<double> history, double value)
-        {
-            history.Enqueue(Math.Clamp(value, 0.0, 100.0));
-            while (history.Count > SparklineHistoryMax)
-            {
-                _ = history.Dequeue();
-            }
-        }
-
-        private string GetLighterColorGradient(string baseColor, int amount = 92)
-        {
-            try
-            {
-                System.Drawing.Color color = System.Drawing.ColorTranslator.FromHtml(baseColor);
-                System.Drawing.Color lighter = System.Drawing.Color.FromArgb(
-                    Math.Min(255, color.A + amount),
-                    Math.Min(255, color.R + amount),
-                    Math.Min(255, color.G + amount),
-                    Math.Min(255, color.B + amount)
-                );
-                return System.Drawing.ColorTranslator.ToHtml(lighter);
-            }
-            catch
-            {
-                return baseColor;
-            }
-        }
+        
 
 
     }

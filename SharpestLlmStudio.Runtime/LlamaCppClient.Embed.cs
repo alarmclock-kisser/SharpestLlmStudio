@@ -1,6 +1,7 @@
 using System.Net.Http.Json;
 using System.Runtime.Versioning;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Xml.Linq;
@@ -66,7 +67,7 @@ namespace SharpestLlmStudio.Runtime
             return accumulated;
         }
 
-        private async Task<float[]> CreateSingleEmbeddingAsync(string content, CancellationToken cancellationToken, bool suppressLogging = false)
+        private async Task<float[]> CreateSingleEmbeddingAsync(string content, CancellationToken cancellationToken, bool suppressLogging = false, int retrySplitLevel = 0)
         {
             // Try server-side embedding first (requires --embedding flag)
             try
@@ -105,6 +106,45 @@ namespace SharpestLlmStudio.Runtime
                     }
                     catch
                     {
+                    }
+
+                    // If the server complains about processing size (batch size), try client-side splitting and retrying
+                    if (!string.IsNullOrWhiteSpace(errorBody) && retrySplitLevel < 4 && (errorBody.Contains("too large to process", StringComparison.OrdinalIgnoreCase) || errorBody.Contains("increase the physical batch size", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        try
+                        {
+                            // Try to parse the reported current batch size and derive a safe target
+                            int reportedBatch = 0;
+                            var m = Regex.Match(errorBody, "current batch size:\\s*(\\d+)", RegexOptions.IgnoreCase);
+                            if (m.Success && int.TryParse(m.Groups[1].Value, out var parsed)) reportedBatch = parsed;
+
+                            int targetTokens = reportedBatch > 0 ? Math.Max(64, reportedBatch - 16) : 256;
+                            const int charsPerToken = 3;
+                            int chunkChars = Math.Max(256, targetTokens * charsPerToken);
+
+                            var parts = ChunkText(content, chunkChars);
+                            float[]? accumulated = null;
+                            int partCount = 0;
+                            foreach (var part in parts)
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                                var vec = await this.CreateSingleEmbeddingAsync(part, cancellationToken, suppressLogging: true, retrySplitLevel: retrySplitLevel + 1);
+                                if (vec.Length == 0) continue;
+
+                                if (accumulated == null) accumulated = new float[vec.Length];
+                                for (int i = 0; i < Math.Min(accumulated.Length, vec.Length); i++) accumulated[i] += vec[i];
+                                partCount++;
+                            }
+
+                            if (accumulated != null && partCount > 0)
+                            {
+                                for (int i = 0; i < accumulated.Length; i++) accumulated[i] /= partCount;
+                                await StaticLogger.LogAsync($"[LlamaCpp] Embedding retry: split into {partCount} parts due to server batch size limit. (retryLevel={retrySplitLevel})");
+                                this.TouchServerActivity();
+                                return accumulated;
+                            }
+                        }
+                        catch { }
                     }
 
                     // If server complains about pooling 'none', retry with alternative pooling key names
@@ -255,33 +295,38 @@ namespace SharpestLlmStudio.Runtime
                 throw new ArgumentException("Key is required.", nameof(key));
             }
 
-            var embedding = await this.CreateEmbeddingAsync(content, cancellationToken);
+            string baseKey = key.Trim();
+            var chunks = SplitKnowledgeContent(content, 1400);
             var now = DateTime.UtcNow;
+            var createdEntries = new List<LlamaKnowledgeEntry>(chunks.Count);
 
-            lock (this._knowledgeLock)
+            for (int i = 0; i < chunks.Count; i++)
             {
-                var existing = this.KnowledgeEntries.FirstOrDefault(e => string.Equals(e.Key, key, StringComparison.OrdinalIgnoreCase));
-                if (existing != null)
-                {
-                    existing.Content = content;
-                    existing.Vector = embedding;
-                    existing.SourcePath = sourcePath;
-                    existing.CreatedAtUtc = now;
-                    return existing;
-                }
+                cancellationToken.ThrowIfCancellationRequested();
 
-                var created = new LlamaKnowledgeEntry
+                string chunkContent = chunks[i];
+                var embedding = await this.CreateEmbeddingAsync(chunkContent, cancellationToken);
+                string chunkKey = chunks.Count == 1
+                    ? baseKey
+                    : $"{baseKey} [chunk {i + 1}/{chunks.Count}]";
+
+                createdEntries.Add(new LlamaKnowledgeEntry
                 {
-                    Key = key,
-                    Content = content,
+                    Key = chunkKey,
+                    Content = chunkContent,
                     Vector = embedding,
                     SourcePath = sourcePath,
                     CreatedAtUtc = now
-                };
-
-                this.KnowledgeEntries.Add(created);
-                return created;
+                });
             }
+
+            lock (this._knowledgeLock)
+            {
+                this.KnowledgeEntries.RemoveAll(k => IsSameKnowledgeBaseKey(k.Key, baseKey));
+                this.KnowledgeEntries.AddRange(createdEntries);
+            }
+
+            return createdEntries[0];
         }
 
         public async Task<LlamaKnowledgeEntry> UpsertKnowledgeFromFileAsync(string filePath, string? key = null, CancellationToken cancellationToken = default)
@@ -332,30 +377,205 @@ namespace SharpestLlmStudio.Runtime
         }
 
         [SupportedOSPlatform("windows")]
-        public async Task<string> BuildKnowledgeAugmentedPromptAsync(string userPrompt, int topK = 3, CancellationToken cancellationToken = default)
+        public async Task<string> BuildKnowledgeAugmentedPromptAsync(string userPrompt, int topK = 3, int contextSize = 0, int maxGenerationTokens = 0, CancellationToken cancellationToken = default)
         {
-            var matches = await this.SearchKnowledgeAsync(userPrompt, topK, cancellationToken: cancellationToken);
-            if (matches.Count == 0)
+            bool isBroadQuery = IsBroadKnowledgeQuery(userPrompt);
+
+            List<LlamaKnowledgeEntry> knowledgeToInclude;
+            if (isBroadQuery)
+            {
+                lock (this._knowledgeLock)
+                {
+                    knowledgeToInclude = this.KnowledgeEntries
+                        .Where(k => k.Vector.Length > 0)
+                        .OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase)
+                        .Select(k => new LlamaKnowledgeEntry
+                        {
+                            Id = k.Id,
+                            Key = k.Key,
+                            Content = k.Content,
+                            SourcePath = k.SourcePath,
+                            Vector = k.Vector,
+                            CreatedAtUtc = k.CreatedAtUtc
+                        })
+                        .ToList();
+                }
+            }
+            else
+            {
+                var matches = await this.SearchKnowledgeAsync(userPrompt, topK, cancellationToken: cancellationToken);
+                knowledgeToInclude = matches.Select(m => m.Entry).ToList();
+            }
+
+            if (knowledgeToInclude.Count == 0)
+            {
+                return userPrompt;
+            }
+
+            int ctxTokens = contextSize > 0 ? contextSize : (this.CurrentContextSize > 0 ? this.CurrentContextSize : this._settings.DefaultContextSize);
+            ctxTokens = Math.Max(512, ctxTokens);
+            int genTokens = maxGenerationTokens > 0 ? maxGenerationTokens : this._settings.DefaultMaxTokens;
+            int reservedForGeneration = Math.Clamp(genTokens, 256, Math.Max(256, ctxTokens - 256));
+            int availablePromptTokens = Math.Max(256, ctxTokens - reservedForGeneration - 96);
+            int availablePromptChars = availablePromptTokens * 3;
+
+            const string introLine = "Nutze die folgenden Wissenskontexte für die Antwort, falls relevant:";
+            const string userPromptHeader = "User Prompt:";
+
+            int baseCharsNeeded = introLine.Length + userPromptHeader.Length + userPrompt.Length + 16;
+
+            int totalKnowledgeChars = 0;
+            var knowledgeBlocks = new List<(string Header, string Content)>();
+            string? lastBaseKey = null;
+            foreach (var entry in knowledgeToInclude)
+            {
+                string baseKey = StaticLogics.GetBaseKnowledgeKey(entry.Key);
+                string header = baseKey != lastBaseKey ? $"--- {baseKey} ---" : string.Empty;
+                lastBaseKey = baseKey;
+                string content = entry.Content ?? string.Empty;
+                int blockLen = header.Length + content.Length + 4;
+                totalKnowledgeChars += blockLen;
+                knowledgeBlocks.Add((header, content));
+            }
+
+            int requiredChars = baseCharsNeeded + totalKnowledgeChars;
+            if (isBroadQuery && requiredChars > availablePromptChars)
+            {
+                int neededTokens = (requiredChars / 3) + reservedForGeneration + 128;
+                int maxAllowed = ctxTokens - 128;
+                availablePromptTokens = Math.Max(availablePromptTokens, Math.Min(neededTokens - reservedForGeneration, maxAllowed - reservedForGeneration));
+                availablePromptChars = availablePromptTokens * 3;
+            }
+
+            int remainingKnowledgeChars = availablePromptChars - baseCharsNeeded;
+            if (remainingKnowledgeChars <= 0)
             {
                 return userPrompt;
             }
 
             var sb = new StringBuilder();
-            sb.AppendLine("Nutze die folgenden Wissenskontexte für die Antwort, falls relevant:");
+            sb.AppendLine(introLine);
             sb.AppendLine();
 
-            int i = 1;
-            foreach (var match in matches)
+            bool addedAnyContext = false;
+            foreach (var (header, content) in knowledgeBlocks)
             {
-                sb.AppendLine($"[{i}] {match.Entry.Key} (score: {match.Similarity:0.000})");
-                sb.AppendLine(match.Entry.Content);
+                int blockChars = header.Length + content.Length + 4;
+                if (blockChars > remainingKnowledgeChars && remainingKnowledgeChars < 64)
+                {
+                    break;
+                }
+
+                if (blockChars > remainingKnowledgeChars)
+                {
+                    if (isBroadQuery)
+                    {
+                        int canFit = remainingKnowledgeChars - header.Length - 4;
+                        if (canFit > 100)
+                        {
+                            if (!string.IsNullOrEmpty(header)) sb.AppendLine(header);
+                            sb.AppendLine(content.Substring(0, canFit));
+                            sb.AppendLine();
+                            addedAnyContext = true;
+                        }
+                        break;
+                    }
+                    continue;
+                }
+
+                if (!string.IsNullOrEmpty(header)) sb.AppendLine(header);
+                sb.AppendLine(content);
                 sb.AppendLine();
-                i++;
+
+                remainingKnowledgeChars -= blockChars;
+                addedAnyContext = true;
             }
 
-            sb.AppendLine("User Prompt:");
+            if (!addedAnyContext)
+            {
+                return userPrompt;
+            }
+
+            sb.AppendLine(userPromptHeader);
             sb.AppendLine(userPrompt);
             return sb.ToString();
+        }
+
+        private static bool IsBroadKnowledgeQuery(string query)
+        {
+            if (string.IsNullOrWhiteSpace(query)) return false;
+
+            string[] broadPatterns =
+            [
+                "alle ", "alles ", "jede ", "jedes ", "jeden ", "jeder ",
+                "every ", "each ", "all ",
+                "list all", "list every", "document all", "document every", "describe all", "describe every",
+                "nenne alle", "nenne jede", "beschreibe alle", "beschreibe jede",
+                "dokumentiere alle", "dokumentiere jede", "erkläre alle", "erkläre jede",
+                "zeige alle", "zeige jede", "zusammenfassung", "overview", "summarize all",
+                "gesamte ", "komplett ", "vollständig", "sämtliche "
+            ];
+
+            string lower = query.ToLowerInvariant();
+            return broadPatterns.Any(p => lower.Contains(p));
+        }
+
+        private static bool IsSameKnowledgeBaseKey(string existingKey, string baseKey)
+        {
+            if (string.Equals(existingKey, baseKey, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return existingKey.StartsWith(baseKey + " [chunk ", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static List<string> SplitKnowledgeContent(string content, int maxChunkChars)
+        {
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                return [string.Empty];
+            }
+
+            var chunks = new List<string>();
+            int start = 0;
+            string text = content.Trim();
+
+            while (start < text.Length)
+            {
+                int end = Math.Min(start + Math.Max(200, maxChunkChars), text.Length);
+
+                if (end < text.Length)
+                {
+                    int paragraph = text.LastIndexOf("\n\n", end, Math.Max(0, end - start));
+                    if (paragraph > start + 200)
+                    {
+                        end = paragraph;
+                    }
+                    else
+                    {
+                        int sentence = text.LastIndexOfAny(['\n', '.', ';', ':', '!', '?'], end - 1, Math.Max(1, end - start));
+                        if (sentence > start + 120)
+                        {
+                            end = sentence + 1;
+                        }
+                    }
+                }
+
+                string chunk = text[start..end].Trim();
+                if (!string.IsNullOrWhiteSpace(chunk))
+                {
+                    chunks.Add(chunk);
+                }
+
+                start = end;
+                while (start < text.Length && char.IsWhiteSpace(text[start]))
+                {
+                    start++;
+                }
+            }
+
+            return chunks.Count == 0 ? [text] : chunks;
         }
 
         [SupportedOSPlatform("windows")]
@@ -365,7 +585,7 @@ namespace SharpestLlmStudio.Runtime
             bool isolated = false,
             [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
-            string augmentedPrompt = await this.BuildKnowledgeAugmentedPromptAsync(prompt, topK, cancellationToken);
+            string augmentedPrompt = await this.BuildKnowledgeAugmentedPromptAsync(prompt, topK, cancellationToken: cancellationToken);
             await foreach (var chunk in this.GenerateAsync(augmentedPrompt, isolated, cancellationToken))
             {
                 yield return chunk;

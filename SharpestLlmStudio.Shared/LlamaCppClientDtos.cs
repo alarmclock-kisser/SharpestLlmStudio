@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace SharpestLlmStudio.Runtime
+namespace SharpestLlmStudio.Shared
 {
     public sealed class LlamaChatMessage
     {
@@ -23,6 +23,7 @@ namespace SharpestLlmStudio.Runtime
         public int MaxTokens { get; set; } = 1024;
         public double Temperature { get; set; } = 0.7;
         public double TopP { get; set; } = 0.9;
+        public double RepetitionPenalty { get; set; } = 1.1;
         public string[]? StopSequences { get; set; }
         public bool Stream { get; set; } = true;
     }
@@ -48,5 +49,13 @@ namespace SharpestLlmStudio.Runtime
     {
         public required LlamaKnowledgeEntry Entry { get; set; }
         public double Similarity { get; set; }
+    }
+
+    public sealed class LoadedImageMetadata
+    {
+        public string FileName { get; init; } = string.Empty;
+        public int Width { get; init; }
+        public int Height { get; init; }
+        public long FileSizeBytes { get; init; }
     }
 }

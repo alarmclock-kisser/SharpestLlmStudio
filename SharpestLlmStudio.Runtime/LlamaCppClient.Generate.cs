@@ -294,9 +294,20 @@ namespace SharpestLlmStudio.Runtime
                 ["stream"] = request.Stream,
                 ["temperature"] = request.Temperature,
                 ["top_p"] = request.TopP,
-                ["max_tokens"] = Math.Max(1, request.MaxTokens),
                 ["cache_prompt"] = !request.Isolated
             };
+
+            // 0 = unlimited (omit max_tokens)
+            if (request.MaxTokens > 0)
+            {
+                payload["max_tokens"] = Math.Max(1, request.MaxTokens);
+            }
+
+            // Repetition penalty (optional)
+            if (request.RepetitionPenalty > 0.0 && Math.Abs(request.RepetitionPenalty - 1.0) > 1e-9)
+            {
+                payload["repetition_penalty"] = request.RepetitionPenalty;
+            }
 
             if (request.StopSequences is { Length: > 0 })
             {

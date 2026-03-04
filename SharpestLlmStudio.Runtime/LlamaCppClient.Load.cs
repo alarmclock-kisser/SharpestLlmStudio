@@ -16,6 +16,7 @@ namespace SharpestLlmStudio.Runtime
         private readonly HttpClient _httpClient = new();
         private string _currentBaseUrl = string.Empty;
         public int CurrentContextSize { get; private set; }
+        public int CurrentBatchSize { get; private set; }
 
         // Async-captured server output (populated via BeginErrorReadLine / BeginOutputReadLine)
         private readonly StringBuilder _serverStderr = new();
@@ -38,7 +39,7 @@ namespace SharpestLlmStudio.Runtime
             }
             else
             {
-                var reused = await TryReuseExistingInstanceAsync(targetBaseUrl, request.ContextSize, cancellationToken);
+                var reused = await TryReuseExistingInstanceAsync(targetBaseUrl, request.ContextSize, request.BatchSize, cancellationToken);
                 if (reused != null)
                 {
                     return reused;
@@ -57,7 +58,7 @@ namespace SharpestLlmStudio.Runtime
                 lock (this._serverStdout) { this._serverStdout.Clear(); }
 
                 // 2. Argumente zusammenbauen
-                var args = $"-m \"{request.ModelInfo.ModelFilePath}\" -ngl {request.GpuLayers} -c {request.ContextSize} --host {request.Host} --port {request.Port}";
+                var args = $"-m \"{request.ModelInfo.ModelFilePath}\" -ngl {request.GpuLayers} -c {request.ContextSize} -b {Math.Max(1, request.BatchSize)} --host {request.Host} --port {request.Port}";
 
                 // For Omni models, always include vision/encoder gguf as --mmproj if available
                 bool shouldIncludeMmproj = request.IncludeMmproj || request.ModelInfo.IsOmni;
@@ -176,6 +177,7 @@ namespace SharpestLlmStudio.Runtime
                 if (isReady)
                 {
                     this.CurrentContextSize = request.ContextSize;
+                    this.CurrentBatchSize = Math.Max(1, request.BatchSize);
                     this.TouchServerActivity();
                     this.StartIdleMonitorIfEnabled();
                     await StaticLogger.LogAsync($"[LlamaCpp] Server ready at {this._currentBaseUrl} after {stopwatch.Elapsed.TotalSeconds:F1}s");
@@ -239,13 +241,13 @@ namespace SharpestLlmStudio.Runtime
             return message;
         }
 
-        public Task<LlamaModelLoadResult?> TryAttachToRunningServerAsync(string host = "127.0.0.1", int port = 8080, int contextSize = 4096, CancellationToken cancellationToken = default)
+        public Task<LlamaModelLoadResult?> TryAttachToRunningServerAsync(string host = "127.0.0.1", int port = 8080, int contextSize = 4096, int batchSize = 512, CancellationToken cancellationToken = default)
         {
             string baseUrl = $"http://{host}:{port}";
-            return this.TryReuseExistingInstanceAsync(baseUrl, contextSize, cancellationToken);
+            return this.TryReuseExistingInstanceAsync(baseUrl, contextSize, batchSize, cancellationToken);
         }
 
-        private async Task<LlamaModelLoadResult?> TryReuseExistingInstanceAsync(string baseUrl, int contextSize, CancellationToken cancellationToken)
+        private async Task<LlamaModelLoadResult?> TryReuseExistingInstanceAsync(string baseUrl, int contextSize, int batchSize, CancellationToken cancellationToken)
         {
             try
             {
@@ -260,6 +262,7 @@ namespace SharpestLlmStudio.Runtime
 
                 this._currentBaseUrl = baseUrl;
                 this.CurrentContextSize = contextSize;
+                this.CurrentBatchSize = Math.Max(1, batchSize);
                 this.TouchServerActivity();
                 string? activeModelId = await this.TryGetActiveModelIdAsync(baseUrl, cts.Token);
 
@@ -349,6 +352,8 @@ namespace SharpestLlmStudio.Runtime
                     this._serverProcess.Dispose();
                     this._serverProcess = null;
                     this._currentBaseUrl = string.Empty;
+                    this.CurrentContextSize = 0;
+                    this.CurrentBatchSize = 0;
                 }
             }
         }
