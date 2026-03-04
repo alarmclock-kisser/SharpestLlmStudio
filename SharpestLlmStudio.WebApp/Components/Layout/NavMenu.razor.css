@@ -126,18 +126,6 @@
     transition: width 0.3s ease;
 }
 
-.hw-bar-text {
-    position: absolute;
-    right: 0.35rem;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 0.64rem;
-    font-weight: 700;
-    color: #222;
-    text-shadow: 0 1px 1px rgba(255,255,255,0.85);
-    pointer-events: none;
-}
-
 .hw-bar-cpu {
     background: linear-gradient(90deg, #1976d2, #42a5f5);
 }
@@ -171,20 +159,15 @@
 }
 
 .hw-resize-handle {
-    margin-top: 0.35rem;
-    height: 10px;
-    border-radius: 8px;
+    margin-top: 0.25rem;
+    height: 4px;
+    border-radius: 2px;
     cursor: ns-resize;
-    background: repeating-linear-gradient(
-        90deg,
-        var(--rz-base-500) 0,
-        var(--rz-base-500) 6px,
-        transparent 6px,
-        transparent 10px
-    );
-    opacity: 0.6;
+    background: var(--rz-base-300);
+    opacity: 0.45;
+    transition: opacity 0.2s ease;
 }
 
 .hw-resize-handle:hover {
-    opacity: 0.95;
+    opacity: 0.8;
 }

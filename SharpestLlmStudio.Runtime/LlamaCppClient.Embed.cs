@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Runtime.Versioning;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -207,6 +208,7 @@ namespace SharpestLlmStudio.Runtime
             return results;
         }
 
+        [SupportedOSPlatform("windows")]
         public async Task<string> BuildKnowledgeAugmentedPromptAsync(string userPrompt, int topK = 3, CancellationToken cancellationToken = default)
         {
             var matches = await this.SearchKnowledgeAsync(userPrompt, topK, cancellationToken: cancellationToken);
@@ -233,6 +235,7 @@ namespace SharpestLlmStudio.Runtime
             return sb.ToString();
         }
 
+        [SupportedOSPlatform("windows")]
         public async IAsyncEnumerable<string> GenerateWithKnowledgeAsync(
             string prompt,
             int topK = 3,

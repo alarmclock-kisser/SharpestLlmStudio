@@ -261,3 +261,26 @@
     opacity: 0.55;
     cursor: not-allowed;
 }
+
+.gen-settings-card {
+    border: 1px solid var(--rz-base-300);
+    padding: 0.4rem 0.55rem;
+}
+
+/* Limit model dropdown popup height */
+::deep .rz-dropdown-panel {
+    max-height: 33vh !important;
+    overflow-y: auto;
+}
+
+.model-sort-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.model-sort-label {
+    font-size: 0.8rem;
+    opacity: 0.75;
+    white-space: nowrap;
+}

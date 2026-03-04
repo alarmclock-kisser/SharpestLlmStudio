@@ -7,6 +7,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="9.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\SharpestLlmStudio.Monitoring\SharpestLlmStudio.Monitoring.csproj" />
     <ProjectReference Include="..\SharpestLlmStudio.Shared\SharpestLlmStudio.Shared.csproj" />
   </ItemGroup>

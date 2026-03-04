@@ -21,7 +21,7 @@ namespace SharpestLlmStudio.Shared
         public double? UsedWattsApprox { get; set; }
         public double? WattsPerHourApprox => this.TotalGenerationTime?.TotalHours > 0 ? this.UsedWattsApprox / this.TotalGenerationTime?.TotalHours : null;
 
-
+        public int ContextSize { get; set; }
         public int TotalContextTokens { get; set; }
 
     }

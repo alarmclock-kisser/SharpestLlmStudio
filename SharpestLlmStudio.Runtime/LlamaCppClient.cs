@@ -157,7 +157,8 @@ namespace SharpestLlmStudio.Runtime
                     GenerationFinished = this.LastGenerationStats.GenerationFinished,
                     TotalTokensGenerated = this.LastGenerationStats.TotalTokensGenerated,
                     UsedWattsApprox = this.LastGenerationStats.UsedWattsApprox,
-                    TotalContextTokens = this.LastGenerationStats.TotalContextTokens
+                    TotalContextTokens = this.LastGenerationStats.TotalContextTokens,
+                    ContextSize = this.LastGenerationStats.ContextSize
                 };
             }
         }

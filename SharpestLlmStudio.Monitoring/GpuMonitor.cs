@@ -1,6 +1,7 @@
 ﻿using SharpestLlmStudio.Monitoring;
 using SharpestLlmStudio.Shared;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Management;
@@ -13,7 +14,7 @@ public sealed class GpuMonitor : IDisposable
 {
     // ------------------------ Public API ------------------------
 
-    public static Dictionary<DateTime, HardwareStatistics> HardwareStatsHistory { get; private set; } = [];
+    public static ConcurrentDictionary<DateTime, HardwareStatistics> HardwareStatsHistory { get; private set; } = [];
     public static readonly List<double> PowerUsageHistory = [];
     private static readonly Lock PowerUsageHistoryLock = new();
     private static readonly TimeSpan DefaultPowerSampleInterval = TimeSpan.FromMilliseconds(100);
@@ -455,7 +456,7 @@ public sealed class GpuMonitor : IDisposable
         hwStats.GpuStats.VramStats.Name = "VRAM";
         hwStats.GpuStats.TotalKiloWattsUsed = TotalKiloWattsUsed;
 
-        HardwareStatsHistory.Add(hwStats.CreatedAt, hwStats);
+        HardwareStatsHistory.TryAdd(hwStats.CreatedAt, hwStats);
 
         return hwStats;
     }

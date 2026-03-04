@@ -13,6 +13,7 @@ namespace SharpestLlmStudio.Runtime
         private Process? _serverProcess;
         private readonly HttpClient _httpClient = new();
         private string _currentBaseUrl = string.Empty;
+        public int CurrentContextSize { get; private set; }
 
         // Async-captured server output (populated via BeginErrorReadLine / BeginOutputReadLine)
         private readonly StringBuilder _serverStderr = new();
@@ -130,6 +131,7 @@ namespace SharpestLlmStudio.Runtime
 
                 if (isReady)
                 {
+                    this.CurrentContextSize = request.ContextSize;
                     await StaticLogger.LogAsync($"[LlamaCpp] Server ready at {this._currentBaseUrl} after {stopwatch.Elapsed.TotalSeconds:F1}s");
                     return new LlamaModelLoadResult
                     {

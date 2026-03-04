@@ -1,15 +1,23 @@
 using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
+using System.Runtime.Versioning;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Linq;
 using SharpestLlmStudio.Shared;
 
 namespace SharpestLlmStudio.Runtime
 {
     public partial class LlamaCppClient
     {
+        // Holds last per-image token estimates for the most recent NormalizeImageInputsAsync call
+        private static readonly Dictionary<string,int> _lastImageTokenEstimates = new(StringComparer.OrdinalIgnoreCase);
+        
+        [SupportedOSPlatform("windows")]
         public IAsyncEnumerable<string> GenerateAsync(string prompt, bool isolated = false, CancellationToken cancellationToken = default)
         {
             return this.GenerateAsync(new LlamaGenerationRequest
@@ -23,6 +31,7 @@ namespace SharpestLlmStudio.Runtime
             }, cancellationToken);
         }
 
+        [SupportedOSPlatform("windows")]
         public IAsyncEnumerable<string> GenerateAsync(string prompt, string[]? images, bool isolated = false, CancellationToken cancellationToken = default)
         {
             return this.GenerateAsync(new LlamaGenerationRequest
@@ -37,6 +46,7 @@ namespace SharpestLlmStudio.Runtime
             }, cancellationToken);
         }
 
+        [SupportedOSPlatform("windows")]
         public async IAsyncEnumerable<string> GenerateAsync(LlamaGenerationRequest request, [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             if (!this.IsServerRunning || string.IsNullOrWhiteSpace(this.CurrentBaseUrl))
@@ -50,8 +60,22 @@ namespace SharpestLlmStudio.Runtime
             }
 
             var normalizedImages = await NormalizeImageInputsAsync(request.Images, cancellationToken);
-            var payload = this.BuildChatCompletionPayload(request, normalizedImages);
+            try
+            {
+                int sum = 0;
+                foreach (var kv in _lastImageTokenEstimates)
+                {
+                    sum += kv.Value;
+                }
+                if (sum > 0)
+                {
+                    await StaticLogger.LogAsync($"[LlamaCpp] Image inputs estimated total ~{sum} tokens across {_lastImageTokenEstimates.Count} item(s) — estimates per image: {string.Join(", ", _lastImageTokenEstimates.Select(kv => kv.Key + ":" + kv.Value))}");
+                }
+            }
+            catch { }
             string assistantText = string.Empty;
+            int maxRetries = 5;
+            int retryCount = 0;
 
             lock (this._generationStatsLock)
             {
@@ -60,37 +84,87 @@ namespace SharpestLlmStudio.Runtime
                     GenerationStarted = DateTime.UtcNow,
                     GenerationFinished = null,
                     TotalTokensGenerated = 0,
-                    TotalContextTokens = request.MaxTokens
+                    TotalContextTokens = 0,
+                    ContextSize = this.CurrentContextSize
                 };
             }
 
-            if (request.Stream)
+            while (retryCount <= maxRetries)
             {
-                await foreach (var chunk in this.StreamChatCompletionChunksAsync(payload, cancellationToken))
-                {
-                    assistantText += chunk;
+                var payload = this.BuildChatCompletionPayload(request, normalizedImages);
+                var outputChunks = new List<string>();
+                bool completed = false;
 
-                    lock (this._generationStatsLock)
+                try
+                {
+                    if (request.Stream)
                     {
-                        this.LastGenerationStats.TotalTokensGenerated = CountRoughTokens(assistantText);
-                        this.LastGenerationStats.GenerationFinished = null;
+                        await foreach (var chunk in this.StreamChatCompletionChunksAsync(payload, cancellationToken))
+                        {
+                            assistantText += chunk;
+                            outputChunks.Add(chunk);
+
+                            lock (this._generationStatsLock)
+                            {
+                                this.LastGenerationStats.TotalTokensGenerated = CountRoughTokens(assistantText);
+                                this.LastGenerationStats.TotalContextTokens = CountRoughTokens(payload["messages"]?.ToJsonString() ?? "") + CountRoughTokens(assistantText);
+                                this.LastGenerationStats.GenerationFinished = null;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        assistantText = await this.GenerateSingleChatCompletionAsync(payload, cancellationToken);
+
+                        lock (this._generationStatsLock)
+                        {
+                            this.LastGenerationStats.TotalTokensGenerated = CountRoughTokens(assistantText);
+                            this.LastGenerationStats.TotalContextTokens = CountRoughTokens(payload["messages"]?.ToJsonString() ?? "") + CountRoughTokens(assistantText);
+                        }
+
+                        if (!string.IsNullOrEmpty(assistantText))
+                        {
+                            outputChunks.Add(assistantText);
+                        }
                     }
 
-                    yield return chunk;
+                    completed = true;
                 }
-            }
-            else
-            {
-                assistantText = await this.GenerateSingleChatCompletionAsync(payload, cancellationToken);
-
-                lock (this._generationStatsLock)
+                catch (HttpRequestException ex) when (ex.Message.Contains("400") && ex.Message.Contains("context", StringComparison.OrdinalIgnoreCase) && retryCount < maxRetries)
                 {
-                    this.LastGenerationStats.TotalTokensGenerated = CountRoughTokens(assistantText);
+                    // Context overflow — trim oldest conversation messages (ring buffer) and retry
+                    retryCount++;
+                    await StaticLogger.LogAsync($"[LlamaCpp] Context overflow on attempt {retryCount}, trimming oldest messages and retrying...");
+
+                    lock (this._conversationLock)
+                    {
+                        // Remove the 2 oldest non-system messages (1 user + 1 assistant pair)
+                        int removed = 0;
+                        while (removed < 2 && this.ConversationMessages.Count > 0)
+                        {
+                            this.ConversationMessages.RemoveAt(0);
+                            removed++;
+                        }
+                    }
+
+                    if (this.ConversationMessages.Count == 0)
+                    {
+                        // No more history to trim — re-throw
+                        throw;
+                    }
+
+                    assistantText = string.Empty;
+                    continue;
                 }
 
-                if (!string.IsNullOrEmpty(assistantText))
+                if (completed)
                 {
-                    yield return assistantText;
+                    foreach (var chunk in outputChunks)
+                    {
+                        yield return chunk;
+                    }
+
+                    break;
                 }
             }
 
@@ -127,8 +201,12 @@ namespace SharpestLlmStudio.Runtime
                 lock (this._conversationLock)
                 {
                     // Trim old messages to avoid exceeding context window
-                    // Rough estimate: ~4 chars per token, reserve 80% of context for history
-                    int maxHistoryChars = (int)(request.MaxTokens * 4 * 0.8);
+                    // Rough estimate: ~3 chars per token (conservative). Reserve space for system prompt, current prompt, generation tokens, and overhead.
+                    int systemPromptTokens = string.IsNullOrWhiteSpace(request.SystemPrompt) ? 0 : (request.SystemPrompt.Length / 3) + 16;
+                    int currentPromptTokens = (request.Prompt.Length / 3) + 16;
+                    int reservedTokens = request.MaxTokens + systemPromptTokens + currentPromptTokens + 256;
+                    int availableContextTokens = Math.Max(128, this.CurrentContextSize - reservedTokens);
+                    int maxHistoryChars = availableContextTokens * 3;
                     int totalChars = 0;
                     var historyMessages = this.ConversationMessages
                         .Where(m => !string.IsNullOrWhiteSpace(m.Content))
@@ -228,7 +306,12 @@ namespace SharpestLlmStudio.Runtime
         private async Task<string> GenerateSingleChatCompletionAsync(JsonObject payload, CancellationToken cancellationToken)
         {
             using var response = await this._httpClient.PostAsJsonAsync($"{this.CurrentBaseUrl}/v1/chat/completions", payload, cancellationToken);
-            response.EnsureSuccessStatusCode();
+            if (!response.IsSuccessStatusCode)
+            {
+                string errorBody = string.Empty;
+                try { errorBody = await response.Content.ReadAsStringAsync(cancellationToken); } catch { }
+                throw new HttpRequestException($"llama.cpp returned {(int)response.StatusCode} ({response.ReasonPhrase}). {errorBody}");
+            }
 
             var json = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken);
             var content = json?["choices"]?[0]?["message"]?["content"]?.GetValue<string>();
@@ -243,14 +326,24 @@ namespace SharpestLlmStudio.Runtime
             };
 
             using var response = await this._httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            response.EnsureSuccessStatusCode();
+            if (!response.IsSuccessStatusCode)
+            {
+                string errorBody = string.Empty;
+                try { errorBody = await response.Content.ReadAsStringAsync(cancellationToken); } catch { }
+                throw new HttpRequestException($"llama.cpp returned {(int)response.StatusCode} ({response.ReasonPhrase}). {errorBody}");
+            }
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             using var reader = new StreamReader(stream);
 
-            while (!reader.EndOfStream && !cancellationToken.IsCancellationRequested)
+            while (!cancellationToken.IsCancellationRequested)
             {
                 var line = await reader.ReadLineAsync(cancellationToken);
+                if (line == null)
+                {
+                    yield break;
+                }
+
                 if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
@@ -280,6 +373,7 @@ namespace SharpestLlmStudio.Runtime
             }
         }
 
+        [SupportedOSPlatform("windows")]
         private static async Task<List<string>> NormalizeImageInputsAsync(string[]? images, CancellationToken cancellationToken)
         {
             var result = new List<string>();
@@ -298,14 +392,88 @@ namespace SharpestLlmStudio.Runtime
                 var trimmed = item.Trim();
                 if (File.Exists(trimmed))
                 {
+                    string ext = Path.GetExtension(trimmed).ToLowerInvariant();
+                    if (ext is ".tif" or ".tiff")
+                    {
+                        if (OperatingSystem.IsWindows())
+                        {
+                            var frames = ExtractTiffFramesAsBase64(trimmed);
+                            result.AddRange(frames);
+
+                            // Estimate tokens for each extracted frame and record
+                            try
+                            {
+                                using var img = Image.FromFile(trimmed);
+                                int frameCount = GetTiffFrameCount(img);
+                                for (int i = 0; i < frameCount; i++)
+                                {
+                                    // use same estimation logic as HomeViewModel (patch size 14)
+                                    int w = img.Width;
+                                    int h = img.Height;
+                                    int estimated = EstimateTokensForImageDimensions(w, h);
+                                    _lastImageTokenEstimates[$"{trimmed}#frame{i}"] = estimated;
+                                }
+                            }
+                            catch { }
+                        }
+                        else
+                        {
+                            byte[] tiffBytes = await File.ReadAllBytesAsync(trimmed, cancellationToken);
+                            result.Add($"data:image/tiff;base64,{Convert.ToBase64String(tiffBytes)}");
+                        }
+
+                        continue;
+                    }
+
                     byte[] bytes = await File.ReadAllBytesAsync(trimmed, cancellationToken);
                     string mime = GetMimeTypeByFileExtension(trimmed);
                     result.Add($"data:{mime};base64,{Convert.ToBase64String(bytes)}");
                     continue;
                 }
 
+                if (trimmed.StartsWith("data:image/tiff", StringComparison.OrdinalIgnoreCase) || trimmed.StartsWith("data:image/tif", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (OperatingSystem.IsWindows())
+                    {
+                        var frames = ExtractTiffFramesFromDataUrl(trimmed);
+                        foreach (var f in frames)
+                        {
+                            result.Add(f);
+                            try
+                            {
+                                using var ms = new MemoryStream(Convert.FromBase64String(f.Substring(f.IndexOf(',') + 1)));
+                                using var img = Image.FromStream(ms);
+                                int estimated = EstimateTokensForImageDimensions(img.Width, img.Height);
+                                _lastImageTokenEstimates[f] = estimated;
+                            }
+                            catch { }
+                        }
+                    }
+                    else
+                    {
+                        result.Add(trimmed);
+                    }
+
+                    continue;
+                }
+
                 if (trimmed.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
                 {
+                    // try to estimate tokens for data urls (png/jpg)
+                    try
+                    {
+                        // attempt to get dimensions for png/jpeg by loading
+                        int commaIdx = trimmed.IndexOf(',');
+                        var meta = trimmed.Substring(5, commaIdx - 5); // e.g. image/png;base64
+                        var comma = trimmed.IndexOf(',');
+                        byte[] bytes = Convert.FromBase64String(trimmed[(comma + 1)..]);
+                        using var ms = new MemoryStream(bytes);
+                        using var img = Image.FromStream(ms);
+                        int est = EstimateTokensForImageDimensions(img.Width, img.Height);
+                        _lastImageTokenEstimates[$"dataurl#{result.Count}"] = est;
+                    }
+                    catch { }
+
                     result.Add(trimmed);
                     continue;
                 }
@@ -348,8 +516,120 @@ namespace SharpestLlmStudio.Runtime
                 ".bmp" => "image/bmp",
                 ".webp" => "image/webp",
                 ".gif" => "image/gif",
+                ".tif" => "image/tiff",
+                ".tiff" => "image/tiff",
                 _ => "image/jpeg"
             };
+        }
+
+        /// <summary>
+        /// Extracts each page/frame of a multi-page TIFF file and converts to PNG base64 data URLs.
+        /// </summary>
+        [SupportedOSPlatform("windows")]
+        private static List<string> ExtractTiffFramesAsBase64(string filePath)
+        {
+            var frames = new List<string>();
+            try
+            {
+                using var image = Image.FromFile(filePath);
+                int frameCount = GetTiffFrameCount(image);
+
+                for (int i = 0; i < frameCount; i++)
+                {
+                    image.SelectActiveFrame(FrameDimension.Page, i);
+                    using var frameBitmap = new Bitmap(image.Width, image.Height);
+                    using (var g = Graphics.FromImage(frameBitmap))
+                    {
+                        g.DrawImage(image, 0, 0, image.Width, image.Height);
+                    }
+
+                    var dataUrl = BitmapToDataUrl(frameBitmap);
+                    frames.Add(dataUrl);
+                    try
+                    {
+                        int estimated = EstimateTokensForImageDimensions(frameBitmap.Width, frameBitmap.Height);
+                        _lastImageTokenEstimates[dataUrl] = estimated;
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                StaticLogger.Log($"[LlamaCpp] Failed to extract TIFF frames from '{filePath}': {ex.Message}");
+            }
+
+            return frames;
+        }
+
+        /// <summary>
+        /// Extracts each page/frame of a multi-page TIFF from a data:image/tiff;base64,... URL.
+        /// </summary>
+        [SupportedOSPlatform("windows")]
+        private static List<string> ExtractTiffFramesFromDataUrl(string dataUrl)
+        {
+            var frames = new List<string>();
+            try
+            {
+                int commaIdx = dataUrl.IndexOf(',');
+                if (commaIdx < 0)
+                {
+                    return frames;
+                }
+
+                byte[] tiffBytes = Convert.FromBase64String(dataUrl[(commaIdx + 1)..]);
+                using var ms = new MemoryStream(tiffBytes);
+                using var image = Image.FromStream(ms);
+                int frameCount = GetTiffFrameCount(image);
+
+                for (int i = 0; i < frameCount; i++)
+                {
+                    image.SelectActiveFrame(FrameDimension.Page, i);
+                    using var frameBitmap = new Bitmap(image.Width, image.Height);
+                    using (var g = Graphics.FromImage(frameBitmap))
+                    {
+                        g.DrawImage(image, 0, 0, image.Width, image.Height);
+                    }
+
+                    frames.Add(BitmapToDataUrl(frameBitmap));
+                }
+            }
+            catch (Exception ex)
+            {
+                StaticLogger.Log($"[LlamaCpp] Failed to extract TIFF frames from data URL: {ex.Message}");
+            }
+
+            return frames;
+        }
+
+        [SupportedOSPlatform("windows")]
+        private static int GetTiffFrameCount(Image image)
+        {
+            try
+            {
+                var dimension = new FrameDimension(image.FrameDimensionsList[0]);
+                return image.GetFrameCount(dimension);
+            }
+            catch
+            {
+                return 1;
+            }
+        }
+
+        [SupportedOSPlatform("windows")]
+        private static string BitmapToDataUrl(Bitmap bitmap)
+        {
+            using var ms = new MemoryStream();
+            bitmap.Save(ms, ImageFormat.Png);
+            return $"data:image/png;base64,{Convert.ToBase64String(ms.ToArray())}";
+        }
+
+        private static int EstimateTokensForImageDimensions(int width, int height)
+        {
+            int patch = 14;
+            int baseTokens = Math.Max(1,
+                (int)Math.Ceiling(width / (double)patch) *
+                (int)Math.Ceiling(height / (double)patch));
+            return Math.Max(1, baseTokens);
         }
 
         private static int CountRoughTokens(string text)

@@ -77,22 +77,22 @@ namespace SharpestLlmStudio.Shared
             }
             this.SizeInMb = modelFileSize / (1024.0 * 1024.0);
 
-            // Try to parse parameters from file name, e.g. "model-7b.gguf" or "model-0.8b.gguf" or "model-258m.gguf"
-            var fileName = Path.GetFileNameWithoutExtension(this.ModelFilePath);
-            var match = System.Text.RegularExpressions.Regex.Match(fileName, @"(\d+(\.\d+)?)([bBmM])");
-            if (match.Success)
+            // Try to parse parameters from directory name first, then file name
+            // Examples: "model-7b", "model-0.8b", "model-258m", "Qwen2.5-0.5B-Instruct"
+            string[] candidates = [this.Name, Path.GetFileNameWithoutExtension(this.ModelFilePath)];
+            foreach (var candidate in candidates)
             {
-                var numberPart = match.Groups[1].Value;
-                var unitPart = match.Groups[3].Value.ToLower();
-                if (double.TryParse(numberPart, out double number))
+                // Require a separator or start-of-string before the number, and a separator/end after the unit
+                // to avoid false matches on quantization tokens like "Q8_0", "IQ4_NL", etc.
+                var match = System.Text.RegularExpressions.Regex.Match(candidate, @"(?:^|[-_\s])(\d+(?:\.\d+)?)([bBmM])(?:[-_\s.]|$)");
+                if (match.Success)
                 {
-                    if (unitPart == "b")
+                    var numberPart = match.Groups[1].Value;
+                    var unitPart = match.Groups[2].Value.ToLower();
+                    if (double.TryParse(numberPart, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double number))
                     {
-                        this.ParametersB = number;
-                    }
-                    else if (unitPart == "m")
-                    {
-                        this.ParametersB = number / 1000.0;
+                        this.ParametersB = unitPart == "b" ? number : number / 1000.0;
+                        break;
                     }
                 }
             }

@@ -7,6 +7,7 @@ using System.Text;
 using System.Diagnostics;
 using SharpestLlmStudio.Shared;
 using SharpestLlmStudio.Runtime;
+using System.Runtime.Versioning;
 
 namespace SharpestLlmStudio.WebApp.ViewModels
 {
@@ -23,12 +24,46 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         // API Data
         public ICollection<string> DirectMlDevices { get; set; } = [];
-        public ICollection<LlamaModelInfo> LlamaModels { get; set; } = [];
+        public ICollection<LlamaModelInfo> LlamaModels { get; private set; } = [];
 
         // State Data
         public string? SelectedDirectMlDevice { get; set; }
         public int DirectMlDeviceIndex => this.DirectMlDevices != null && this.SelectedDirectMlDevice != null ? this.DirectMlDevices.ToList().IndexOf(this.SelectedDirectMlDevice) -1 : -1;
         public string? SelectedModelName { get; set; } = null;
+
+        public static readonly IReadOnlyList<string> ModelSortOptions = ["Alphabetical", "Size", "Parameters", "Newest"];
+
+        private string modelSortMode = "Alphabetical";
+        public string ModelSortMode
+        {
+            get => this.modelSortMode;
+            set
+            {
+                this.modelSortMode = value ?? "Alphabetical";
+                // keep index in sync
+                var idx = ModelSortOptions.ToList().IndexOf(this.modelSortMode);
+                this.ModelSortIndex = idx >= 0 ? idx : 0;
+                this.ApplyModelSort();
+                this.RequestUiRefresh();
+            }
+        }
+
+        private int modelSortIndex = 0;
+        public int ModelSortIndex
+        {
+            get => this.modelSortIndex;
+            set
+            {
+                int idx = Math.Clamp(value, 0, ModelSortOptions.Count - 1);
+                this.modelSortIndex = idx;
+                this.modelSortMode = ModelSortOptions[idx];
+                this.ApplyModelSort();
+                // after sorting, select the top-most model automatically
+                this.SelectedModelName = this.LlamaModels.FirstOrDefault()?.Name;
+                this.RequestUiRefresh();
+            }
+        }
+
         public bool ForceUnload { get; set; } = true;
         public LlamaModelInfo? LoadedModel { get; set; } = null;
         public int ContextSize { get; set; } = 1024;
@@ -233,6 +268,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public string SystemPrompt { get; set; } = "You are a helpful, concise assistant.";
 
         public List<LlamaChatMessage> ChatMessages { get; private set; } = [];
+        // Sum of estimated tokens for uploaded images (updated on upload)
+        public int ImageEstimatedTokensTotal { get; private set; } = 0;
 
         public string ContextSaveName { get; set; } = "session";
         public string? SelectedContextFilePath { get; set; } = null;
@@ -338,6 +375,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         }
 
         [JSInvokable]
+        [SupportedOSPlatform("windows")]
         public async Task OnEnterPressed()
         {
             if (this.IsGenerating)
@@ -504,26 +542,31 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
                 try
                 {
-                    using var stream = file.OpenReadStream(25 * 1024 * 1024, cancellationToken);
+                    using var stream = file.OpenReadStream(100 * 1024 * 1024, cancellationToken);
                     using var ms = new MemoryStream();
                     await stream.CopyToAsync(ms, cancellationToken);
 
-                    string dataUrl = $"data:{(string.IsNullOrWhiteSpace(file.ContentType) ? "image/jpeg" : file.ContentType)};base64,{Convert.ToBase64String(ms.ToArray())}";
+                    string contentType = string.IsNullOrWhiteSpace(file.ContentType) ? GuessMimeTypeByExtension(file.Name) : file.ContentType;
+                    string dataUrl = $"data:{contentType};base64,{Convert.ToBase64String(ms.ToArray())}";
                     if (!this.SelectedImagePaths.Contains(dataUrl, StringComparer.Ordinal))
                     {
                         int width = 0;
                         int height = 0;
-                        try
+                        bool isTiff = contentType.Contains("tiff", StringComparison.OrdinalIgnoreCase) || contentType.Contains("tif", StringComparison.OrdinalIgnoreCase);
+                        if (!isTiff)
                         {
-                            var dimensions = await this.Js.InvokeAsync<int[]>("sharpestNavMenu.getImageDimensionsFromDataUrl", dataUrl);
-                            if (dimensions is { Length: >= 2 })
+                            try
                             {
-                                width = Math.Max(0, dimensions[0]);
-                                height = Math.Max(0, dimensions[1]);
+                                var dimensions = await this.Js.InvokeAsync<int[]>("sharpestNavMenu.getImageDimensionsFromDataUrl", dataUrl);
+                                if (dimensions is { Length: >= 2 })
+                                {
+                                    width = Math.Max(0, dimensions[0]);
+                                    height = Math.Max(0, dimensions[1]);
+                                }
                             }
-                        }
-                        catch
-                        {
+                            catch
+                            {
+                            }
                         }
 
                         this.SelectedImagePaths.Add(dataUrl);
@@ -534,6 +577,20 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                             Height = height,
                             FileSizeBytes = (long) file.Size
                         };
+
+                        // Estimate tokens for this image and update total
+                        try
+                        {
+                            int estimatedTokens = EstimateImageTokens(width, height, this.AsBytes, this.ImageFormat, this.BitDepthEnabled ? this.BitDepth : null);
+                            this.ImageEstimatedTokensTotal += estimatedTokens;
+                            await StaticLogger.LogAsync($"[HomeViewModel] Uploaded image '{file.Name}' estimated ~{estimatedTokens} tokens (width={width},height={height},format={this.ImageFormat},bytes={file.Size})");
+
+                            // Log approximate context usage (conversation + images)
+                            int convTokens = CountRoughTokens(string.Join(" ", this.Client.GetConversationSnapshot().Select(m => m.Content)));
+                            int totalEstimated = Math.Min(this.ContextSize, convTokens + this.ImageEstimatedTokensTotal);
+                            await StaticLogger.LogAsync($"[HomeViewModel] Estimated context usage after upload: {totalEstimated} / {this.ContextSize} tokens (conversation {convTokens} + images {this.ImageEstimatedTokensTotal})");
+                        }
+                        catch { }
                     }
                 }
                 catch (Exception ex)
@@ -546,6 +603,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.RequestUiRefresh();
         }
 
+        [SupportedOSPlatform("windows")]
         public async Task StartGenerationAsync()
         {
             if (this.IsGenerating || !this.IsLoaded || string.IsNullOrWhiteSpace(this.UserInput))
@@ -567,7 +625,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             var generationStats = new GenerationStats
             {
                 GenerationStarted = DateTime.UtcNow,
-                TotalContextTokens = this.ContextSize
+                TotalContextTokens = 0,
+                ContextSize = this.ContextSize
             };
             this.LastGenerationStats = generationStats;
 
@@ -625,12 +684,16 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 }
 
                 this.LastActionMessage = "Generation finished.";
+
+                // Sync UI chat messages from client — ring buffer may have trimmed oldest messages
+                this.SyncChatMessagesFromClient();
             }
             catch (OperationCanceledException)
             {
                 assistantMessage.Content = string.IsNullOrWhiteSpace(assistantText) ? "[Generation canceled]" : assistantText;
                 this.LastGenerationStats = this.Client.GetLastGenerationStatsSnapshot();
                 this.LastActionMessage = "Generation canceled.";
+                this.SyncChatMessagesFromClient();
             }
             catch (Exception ex)
             {
@@ -638,6 +701,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 assistantMessage.Content = string.IsNullOrWhiteSpace(assistantText) ? $"[Error] {ex.Message}" : assistantText;
                 this.LastGenerationStats = this.Client.GetLastGenerationStatsSnapshot();
                 await StaticLogger.LogAsync(ex, "[HomeViewModel] Error while generating response");
+                this.SyncChatMessagesFromClient();
             }
             finally
             {
@@ -657,7 +721,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         public async Task RefreshAsync()
         {
-            this.LlamaModels = this.Client.Models;
+            this.LlamaModels = this.Client.Models.ToList();
+            this.ApplyModelSort();
 
             if (this.FirstRender)
             {
@@ -671,6 +736,22 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
 
                 this.FirstRender = false;
+            }
+        }
+
+        private void ApplyModelSort()
+        {
+            this.LlamaModels = this.ModelSortMode switch
+            {
+                "Size" => this.LlamaModels.OrderByDescending(m => m.SizeInMb).ToList(),
+                "Parameters" => this.LlamaModels.OrderByDescending(m => m.ParametersB ?? 0).ToList(),
+                "Newest" => this.LlamaModels.OrderByDescending(m => m.LastModified).ToList(),
+                _ => this.LlamaModels.OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase).ToList()
+            };
+            // After sorting, ensure the SelectedModelName points to the first model if available
+            if (this.LlamaModels.FirstOrDefault() is LlamaModelInfo first)
+            {
+                this.SelectedModelName = first.Name;
             }
         }
 
@@ -859,6 +940,19 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             };
         }
 
+        private static string GuessMimeTypeByExtension(string fileName)
+        {
+            return Path.GetExtension(fileName).ToLowerInvariant() switch
+            {
+                ".png" => "image/png",
+                ".bmp" => "image/bmp",
+                ".webp" => "image/webp",
+                ".gif" => "image/gif",
+                ".tif" or ".tiff" => "image/tiff",
+                _ => "image/jpeg"
+            };
+        }
+
         public async Task SaveContextAsync()
         {
             var result = await this.Client.SaveContextAsync(this.ContextSaveName);
@@ -1006,6 +1100,13 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.LastActionMessage = killed.HasValue
                 ? $"Killed {killed.Value} llama-server instance(s)."
                 : "Failed to kill llama-server instances.";
+
+            // Server is gone — reset loaded state
+            this.IsLoaded = false;
+            this.LoadedModel = null;
+            this.ModelLoadingTimeString = "Model unloaded (killed).";
+            this.IsModelPanelExpanded = true;
+
             this.RequestUiRefresh();
             return Task.CompletedTask;
         }
@@ -1118,7 +1219,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
                         _ = Task.Run(async () =>
                         {
-                            await Task.Delay(3000);
+                            await Task.Delay(5000);
                             if (this.IsLoaded)
                             {
                                 this.IsModelPanelExpanded = false;
@@ -1168,6 +1269,11 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         {
             try
             {
+                if (!OperatingSystem.IsWindows())
+                {
+                    return;
+                }
+
                 this.LastHardwareStats = await this.Client.GetCurrentHardwareStatisticsAsync();
 
                 if (this.LastHardwareStats?.CpuStats != null)

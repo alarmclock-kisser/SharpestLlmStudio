@@ -36,18 +36,30 @@
 
         <div class="collapsible @(VM.IsModelPanelExpanded ? "expanded" : "collapsed")">
             <RadzenStack Gap="1rem" class="collapsible-inner">
-                <RadzenFormField Text="Model" Variant="Variant.Outlined" Style="width:100%;">
-                    <ChildContent>
-                        <RadzenDropDown @bind-Value="VM.SelectedModelName"
-                                        Data="@VM.LlamaModels"
-                                        TextProperty="DisplayName"
-                                        ValueProperty="Name"
-                                        Placeholder="Select a model…"
-                                        Disabled="@(VM.IsLoaded || VM.IsBusy)"
-                                        Style="width:100%;"
-                                        Change="@OnSelectedModelChanged" />
-                    </ChildContent>
-                </RadzenFormField>
+                <div style="display:flex;gap:0.5rem;align-items:center;width:100%;">
+                    <div style="flex:1;">
+                        <RadzenFormField Text="Model" Variant="Variant.Outlined" Style="width:100%;">
+                            <ChildContent>
+                                <RadzenDropDown @bind-Value="VM.SelectedModelName"
+                                                Data="@VM.LlamaModels"
+                                                TextProperty="DisplayName"
+                                                ValueProperty="Name"
+                                                Placeholder="Select a model…"
+                                                Disabled="@(VM.IsLoaded || VM.IsBusy)"
+                                                Style="width:100%;"
+                                                Change="@OnSelectedModelChanged" />
+                            </ChildContent>
+                        </RadzenFormField>
+                    </div>
+
+                    <div style="width:220px;display:flex;flex-direction:column;align-items:flex-start;">
+                        <div style="display:flex;align-items:center;gap:0.25rem;">
+                            <button class="rz-button" type="button" @onclick="@(async () => { VM.ModelSortIndex = Math.Max(0, VM.ModelSortIndex - 1); await Task.CompletedTask; })" disabled="@(VM.ModelSortIndex == 0)">▲</button>
+                            <button class="rz-button" type="button" @onclick="@(async () => { VM.ModelSortIndex = Math.Min(HomeViewModel.ModelSortOptions.Count - 1, VM.ModelSortIndex + 1); await Task.CompletedTask; })" disabled="@(VM.ModelSortIndex == HomeViewModel.ModelSortOptions.Count - 1)">▼</button>
+                            <span style="margin-left:0.5rem;font-size:0.9rem;">@HomeViewModel.ModelSortOptions[VM.ModelSortIndex]</span>
+                        </div>
+                    </div>
+                </div>
 
                 <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
                     <RadzenCheckBox @bind-Value="VM.UseMmproj" Disabled="@(!HasMmproj || VM.IsLoaded || VM.IsBusy)" TValue="bool" />
@@ -153,7 +165,7 @@
                     <RadzenButton Text="Clear Store" Icon="delete_sweep" ButtonStyle="ButtonStyle.Danger" Click="@OnClearKnowledgeStore" />
                 </RadzenStack>
 
-                <RadzenTextArea @bind-Value="VM.KnowledgeContent" Rows="4" Placeholder="JSON/XML/Text Inhalt für Vektorisierung..." Style="width:100%;" Name="knowledgeContent" />
+                <RadzenTextArea @bind-Value="VM.KnowledgeContent" Rows="4" Placeholder="JSON/XML/Text content for vectorization..." Style="width:100%;" Name="knowledgeContent" />
 
                 <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap">
                     <RadzenFormField Text="Search Query" Variant="Variant.Outlined">
@@ -210,51 +222,66 @@
         </RadzenStack>
 
         <RadzenStack Gap="0.75rem" class="chat-card-stack">
+            <RadzenCard Variant="Variant.Flat" class="gen-settings-card">
+                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
+                    <RadzenIcon Icon="tune" Style="font-size:1rem;" />
+                    <RadzenText TextStyle="TextStyle.Subtitle2" Text="Generation Settings" class="rz-mb-0" />
+                    <div style="flex:1"></div>
+                    <RadzenButton Icon="@(genSettingsExpanded ? "remove" : "add")" Size="ButtonSize.Small" class="collapse-btn" Click="ToggleGenSettingsAsync" />
+                </RadzenStack>
+
+                <div class="collapsible @(genSettingsExpanded ? "expanded" : "collapsed")">
+                    <RadzenStack Gap="0.6rem" class="collapsible-inner">
+                        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.75rem" Wrap="FlexWrap.Wrap">
+                            <RadzenCheckBox TValue="bool" @bind-Value="VM.IsolatedGeneration" Name="isolatedGeneration" />
+                            <RadzenLabel Text="Isolated (stateless)" Component="isolatedGeneration" />
+
+                            <RadzenCheckBox TValue="bool" @bind-Value="VM.UseSystemPrompt" Name="useSystemPrompt" />
+                            <RadzenLabel Text="System Prompt" Component="useSystemPrompt" />
+
+                            <RadzenCheckBox TValue="bool" @bind-Value="VM.AutoSaveEnabled" Name="autoSaveGeneration" />
+                            <RadzenLabel Text="Auto Save Context" Component="autoSaveGeneration" />
+                        </RadzenStack>
+
+                        @if (VM.UseSystemPrompt)
+                        {
+                            <RadzenTextArea @bind-Value="VM.SystemPrompt" Rows="2" Placeholder="System prompt..." Style="width:100%;" Name="systemPromptInput" />
+                        }
+
+                        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap">
+                            <RadzenFormField Text="Max Tokens" Variant="Variant.Outlined">
+                                <ChildContent>
+                                    <RadzenNumeric @bind-Value="VM.GenMaxTokens" TValue="int" Min="32" Max="8192" Step="32" Style="width:110px;" />
+                                </ChildContent>
+                            </RadzenFormField>
+
+                            <RadzenFormField Text="Temperature" Variant="Variant.Outlined">
+                                <ChildContent>
+                                    <RadzenNumeric @bind-Value="VM.GenTemperature" TValue="float" Min="0" Max="2" Step="0.1" Style="width:110px;" />
+                                </ChildContent>
+                            </RadzenFormField>
+
+                            <RadzenFormField Text="Top P" Variant="Variant.Outlined">
+                                <ChildContent>
+                                    <RadzenNumeric @bind-Value="VM.GenTopP" TValue="float" Min="0" Max="1" Step="0.05" Style="width:110px;" />
+                                </ChildContent>
+                            </RadzenFormField>
+                        </RadzenStack>
+                    </RadzenStack>
+                </div>
+            </RadzenCard>
+
             <textarea id="promptInput"
                       @bind="VM.UserInput"
                       @bind:event="oninput"
                       rows="4"
-                      placeholder="Prompt eingeben..."
+                      placeholder="Enter your prompt..."
                       class="prompt-textarea"
                       disabled="@(!VM.IsLoaded || VM.IsBusy)"></textarea>
 
-            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.75rem" Wrap="FlexWrap.Wrap">
-                <RadzenCheckBox TValue="bool" @bind-Value="VM.IsolatedGeneration" Name="isolatedGeneration" />
-                <RadzenLabel Text="Isolated (stateless)" Component="isolatedGeneration" />
-
-                <RadzenCheckBox TValue="bool" @bind-Value="VM.UseSystemPrompt" Name="useSystemPrompt" />
-                <RadzenLabel Text="System Prompt" Component="useSystemPrompt" />
-
-                <RadzenCheckBox TValue="bool" @bind-Value="VM.AutoSaveEnabled" Name="autoSaveGeneration" />
-                <RadzenLabel Text="Auto Save Context" Component="autoSaveGeneration" />
-            </RadzenStack>
-
-            @if (VM.UseSystemPrompt)
-            {
-                <RadzenTextArea @bind-Value="VM.SystemPrompt" Rows="2" Placeholder="System prompt..." Style="width:100%;" Name="systemPromptInput" />
-            }
-
             <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap">
                 <RadzenButton Text="Browse Images" Icon="image_search" ButtonStyle="ButtonStyle.Light" Click="OnBrowseImagesClick" Disabled="@VM.IsGenerating" />
-                <InputFile id="imagePicker" OnChange="OnImagesSelected" multiple accept="image/*" style="display:none;" />
-
-                <RadzenFormField Text="Max Tokens" Variant="Variant.Outlined">
-                    <ChildContent>
-                        <RadzenNumeric @bind-Value="VM.GenMaxTokens" TValue="int" Min="32" Max="8192" Step="32" Style="width:110px;" />
-                    </ChildContent>
-                </RadzenFormField>
-
-                <RadzenFormField Text="Temperature" Variant="Variant.Outlined">
-                    <ChildContent>
-                        <RadzenNumeric @bind-Value="VM.GenTemperature" TValue="float" Min="0" Max="2" Step="0.1" Style="width:110px;" />
-                    </ChildContent>
-                </RadzenFormField>
-
-                <RadzenFormField Text="Top P" Variant="Variant.Outlined">
-                    <ChildContent>
-                        <RadzenNumeric @bind-Value="VM.GenTopP" TValue="float" Min="0" Max="1" Step="0.05" Style="width:110px;" />
-                    </ChildContent>
-                </RadzenFormField>
+                <InputFile id="imagePicker" OnChange="OnImagesSelected" multiple accept="image/*,.tif,.tiff" style="display:none;" />
 
                 <RadzenButton Text="Generate" Icon="send" ButtonStyle="ButtonStyle.Primary" Disabled="@(!VM.CanSend || !VM.IsLoaded || VM.IsBusy)" Click="@OnGenerateAsync" />
                 <RadzenButton Text="Cancel" Icon="stop" ButtonStyle="ButtonStyle.Warning" Disabled="@(!VM.IsGenerating)" Click="@OnCancelGeneration" />
@@ -288,7 +315,7 @@
             <div id="chat-output" class="chat-output">
                 @if (VM.ChatMessages.Count == 0)
                 {
-                    <RadzenText TextStyle="TextStyle.Caption" Text="Noch keine Unterhaltung. Lade ein Modell und starte mit einem Prompt." />
+                    <RadzenText TextStyle="TextStyle.Caption" Text="No conversation yet. Load a model and start with a prompt or load a previous context." />
                 }
                 else
                 {
@@ -309,12 +336,14 @@
     private const string ModelExpandedStorageKey = "home.model.expanded";
     private const string ContextExpandedStorageKey = "home.context.expanded";
     private const string KnowledgeExpandedStorageKey = "home.knowledge.expanded";
+    private const string GenSettingsExpandedStorageKey = "home.gensettings.expanded";
     private const string ChatOutputElementId = "chat-output";
 
     private bool? _lastLoadedState;
     private int _lastChatMessageCount;
     private bool _panelStateLoaded;
     private bool imageAttachmentsExpanded = true;
+    private bool genSettingsExpanded = false;
     private DotNetObjectReference<HomeViewModel>? _vmRef;
 
     private LlamaModelInfo? SelectedModelInfo => VM.LlamaModels.FirstOrDefault(m => m.Name == VM.SelectedModelName);
@@ -335,7 +364,7 @@
             }
 
             string total = stats.TotalGenerationTime.HasValue ? $"{stats.TotalGenerationTime.Value.TotalSeconds:F1}s" : "-";
-            return $"(tok: {stats.TotalTokensGenerated} | tok/s: {stats.TokensPerSecond:F2} | total: {total})";
+            return $"(tok: {stats.TotalTokensGenerated} | tok/s: {stats.TokensPerSecond:F3} | total: {total}) [{stats.TotalContextTokens} of {stats.ContextSize} tokens used]";
         }
     }
 
@@ -421,6 +450,12 @@
         imageAttachmentsExpanded = !imageAttachmentsExpanded;
     }
 
+    private async Task ToggleGenSettingsAsync()
+    {
+        genSettingsExpanded = !genSettingsExpanded;
+        await PersistPanelStatesAsync();
+    }
+
     private async Task OnBrowseKnowledgeFilesClick()
     {
         await JS.InvokeVoidAsync("sharpestNavMenu.triggerClick", "knowledgeFilePicker");
@@ -437,10 +472,12 @@
         await JS.InvokeVoidAsync("localStorage.removeItem", ModelExpandedStorageKey);
         await JS.InvokeVoidAsync("localStorage.removeItem", ContextExpandedStorageKey);
         await JS.InvokeVoidAsync("localStorage.removeItem", KnowledgeExpandedStorageKey);
+        await JS.InvokeVoidAsync("localStorage.removeItem", GenSettingsExpandedStorageKey);
 
         VM.IsModelPanelExpanded = true;
         VM.IsContextPanelExpanded = false;
         VM.IsKnowledgePanelExpanded = false;
+        genSettingsExpanded = false;
     }
 
     private async Task PersistPanelStatesAsync()
@@ -448,6 +485,7 @@
         await JS.InvokeVoidAsync("localStorage.setItem", ModelExpandedStorageKey, VM.IsModelPanelExpanded ? "1" : "0");
         await JS.InvokeVoidAsync("localStorage.setItem", ContextExpandedStorageKey, VM.IsContextPanelExpanded ? "1" : "0");
         await JS.InvokeVoidAsync("localStorage.setItem", KnowledgeExpandedStorageKey, VM.IsKnowledgePanelExpanded ? "1" : "0");
+        await JS.InvokeVoidAsync("localStorage.setItem", GenSettingsExpandedStorageKey, genSettingsExpanded ? "1" : "0");
     }
 
     private async Task<bool> GetStoredBoolAsync(string key, bool defaultValue)

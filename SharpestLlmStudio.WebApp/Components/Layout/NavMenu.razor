@@ -20,21 +20,25 @@
             <RadzenLabel Text="Wrap" Component="wrapLogsCheckbox" class="rz-mr-2" />
 
             <RadzenLabel Text="Size" Component="logFontSizeInput" />
-            <RadzenNumeric TValue="int" @bind-Value="logFontSizePx" Min="6" Max="24" Step="1" Style="width:64px;" Name="logFontSizeInput" class="compact-numeric" />
+            <RadzenNumeric TValue="int" @bind-Value="logFontSizePx" Min="6" Max="24" Step="1" Style="width:64px;height:1.8rem" Name="logFontSizeInput" class="compact-numeric" />
 
-            <RadzenButton Icon="content_copy" Size="ButtonSize.Small" Variant="Variant.Outlined" ButtonStyle="ButtonStyle.Light" Click="CopyLogsToClipboardAsync" Disabled="@(_logEntryCount == 0)" />
+            <RadzenButton Icon="content_copy" Size="ButtonSize.Small" Variant="Variant.Flat" ButtonStyle="ButtonStyle.Light" Click="CopyLogsToClipboardAsync" Disabled="@(_logEntryCount == 0)" />
         </RadzenStack>
 
         <div id="@logContainerId" class="log-container @(wrapLogs ? "wrap" : "nowrap")" style="font-size:@($"{logFontSizePx}px")">
             @if (_logEntries.Count == 0)
             {
-                <RadzenText Text="Noch keine Log-Einträge." TextStyle="TextStyle.Caption" />
+                <RadzenText Text="There are no log entries yet.." TextStyle="TextStyle.Caption" />
             }
             else
             {
                 @foreach (var entry in _logEntries)
                 {
                     <div class="log-line">@entry</div>
+                    @if (wrapLogs)
+                    {
+                        <div class="log-separator-line">        '        </div>
+                    }
                 }
             }
         </div>
@@ -47,8 +51,6 @@
                 <RadzenText Text="HW Monitoring" TextStyle="TextStyle.Subtitle2" />
             </RadzenStack>
             <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.35rem">
-                <RadzenLabel Text="ms" Component="hwIntervalMsInput" class="hw-interval-unit" />
-                <RadzenNumeric TValue="int" @bind-Value="HardwareRefreshIntervalMsValue" Min="100" Max="10000" Step="100" Name="hwIntervalMsInput" Style="width:74px;" class="compact-numeric" />
                 <RadzenButton Icon="@(hardwareExpanded ? "expand_less" : "expand_more")" Size="ButtonSize.Small" Variant="Variant.Text" Click="ToggleHardwareExpanded" />
             </RadzenStack>
         </RadzenStack>
@@ -57,11 +59,15 @@
         {
             @if (LlamaClient.GPUMonitor == null)
             {
-                <RadzenText class="rz-mt-2" TextStyle="TextStyle.Caption" Text="Monitoring ist deaktiviert (`EnableMonitoring=false`)." />
+                <RadzenText class="rz-mt-2" TextStyle="TextStyle.Caption" Text="Monitoring is toggled off (`EnableMonitoring=false`)." />
             }
             else
             {
                 <RadzenStack id="hw-panel-content" Gap="0.4rem" class="rz-mt-2 hw-panel" style="@($"height:{hwPanelHeight}px;max-height:{hwPanelHeight}px;overflow:auto;")">
+                    <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.35rem">
+                        <RadzenLabel Text="Interval (ms)" Component="hwIntervalMsInput" class="hw-interval-unit" />
+                        <RadzenNumeric TValue="int" @bind-Value="HardwareRefreshIntervalMsValue" Min="100" Max="10000" Step="100" Name="hwIntervalMsInput" Style="width:74px;height:1.8rem" class="compact-numeric" />
+                    </RadzenStack>
                     @if (_hardwareSnapshot != null)
                     {
                         <RadzenText TextStyle="TextStyle.Caption" class="hw-timestamp" Text="@($"Updated: {_hardwareSnapshot.CreatedAt:HH:mm:ss.fff} | {_hardwareSnapshot.FetchingDurationMs} ms")" />
@@ -74,7 +80,7 @@
 
                     @if (_hardwareSnapshot == null)
                     {
-                        <RadzenText TextStyle="TextStyle.Caption" Text="Noch keine Hardwaredaten." />
+                        <RadzenText TextStyle="TextStyle.Caption" Text="No hardware statistics available yet." />
                     }
                     else
                     {
@@ -87,7 +93,6 @@
                             </div>
                             <div class="hw-bar-container">
                                 <div class="hw-bar hw-bar-cpu" style="width:@($"{Math.Clamp(_hardwareSnapshot.CpuStats.AverageLoadPercentage, 0, 100):F1}%")"></div>
-                                <span class="hw-bar-text">@($"{_hardwareSnapshot.CpuStats.AverageLoadPercentage:F1}%")</span>
                             </div>
                             @if (_cpuHistory.Count > 1)
                             {
@@ -105,8 +110,11 @@
                             </div>
                             <div class="hw-bar-container">
                                 <div class="hw-bar hw-bar-ram" style="width:@($"{Math.Clamp(_hardwareSnapshot.RamStats.MemoryUsagePercentage, 0, 100):F1}%")"></div>
-                                <span class="hw-bar-text">@($"{_hardwareSnapshot.RamStats.MemoryUsagePercentage:F1}%")</span>
                             </div>
+                            @if (_ramHistory.Count > 1)
+                            {
+                                <div class="hw-sparkline">@((MarkupString)BuildSparklineSvg(_ramHistory, 200, 40, "#7b1fa2", "#e1bee7", absoluteScale: true))</div>
+                            }
                             <RadzenText TextStyle="TextStyle.Caption" class="hw-detail" Text="@($"{_hardwareSnapshot.RamStats.UsedMemoryMb:F0} / {_hardwareSnapshot.RamStats.TotalMemoryMb:F0} MB")" />
                         </div>
 
@@ -119,7 +127,6 @@
                             </div>
                             <div class="hw-bar-container">
                                 <div class="hw-bar hw-bar-gpu" style="width:@($"{Math.Clamp(_hardwareSnapshot.GpuStats.CoreLoadPercentage, 0, 100):F1}%")"></div>
-                                <span class="hw-bar-text">@($"{_hardwareSnapshot.GpuStats.CoreLoadPercentage:F1}%")</span>
                             </div>
                             @if (_gpuHistory.Count > 1)
                             {
@@ -137,18 +144,17 @@
                             </div>
                             <div class="hw-bar-container">
                                 <div class="hw-bar hw-bar-vram" style="width:@($"{Math.Clamp(_hardwareSnapshot.GpuStats.VramStats.MemoryUsagePercentage, 0, 100):F1}%")"></div>
-                                <span class="hw-bar-text">@($"{_hardwareSnapshot.GpuStats.VramStats.MemoryUsagePercentage:F1}%")</span>
                             </div>
+                            @if (_vramHistory.Count > 1)
+                            {
+                                <div class="hw-sparkline">@((MarkupString)BuildSparklineSvg(_vramHistory, 200, 40, "#e65100", "#ffe0b2", absoluteScale: true))</div>
+                            }
                             <RadzenText TextStyle="TextStyle.Caption" class="hw-detail" Text="@($"{_hardwareSnapshot.GpuStats.VramStats.UsedMemoryMb:F0} / {_hardwareSnapshot.GpuStats.VramStats.TotalMemoryMb:F0} MB")" />
                         </div>
                     }
                 </RadzenStack>
 
-                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.4rem" class="rz-mt-1">
-                    <RadzenLabel Text="Height" class="hw-interval-unit" />
-                    <RadzenNumeric TValue="int" @bind-Value="hwPanelHeight" Min="120" Max="800" Step="20" Style="width:74px;" class="compact-numeric" />
-                </RadzenStack>
-                <div id="hw-panel-resize-handle" class="hw-resize-handle" title="Drag to resize HW panel"></div>
+                <div id="hw-panel-resize-handle" class="hw-resize-handle" title="Drag to resize"></div>
             }
         }
     </RadzenCard>
@@ -165,6 +171,8 @@
 
     private readonly Queue<double> _cpuHistory = new();
     private readonly Queue<double> _gpuHistory = new();
+    private readonly Queue<double> _ramHistory = new();
+    private readonly Queue<double> _vramHistory = new();
     private const int SparklineMax = 60;
 
     private CancellationTokenSource? _hardwarePollingCts;
@@ -313,7 +321,9 @@
 
         // Append to sparkline history
         this.AppendHistory(this._cpuHistory, snapshot.CpuStats.AverageLoadPercentage);
+        this.AppendHistory(this._ramHistory, snapshot.RamStats.MemoryUsagePercentage);
         this.AppendHistory(this._gpuHistory, snapshot.GpuStats.CoreLoadPercentage);
+        this.AppendHistory(this._vramHistory, snapshot.GpuStats.VramStats.MemoryUsagePercentage);
 
         await this.InvokeAsync(this.StateHasChanged);
     }
@@ -332,7 +342,7 @@
         await this.JSRuntime.InvokeVoidAsync("sharpestNavMenu.scrollToBottom", this.logContainerId);
     }
 
-    private static string BuildSparklineSvg(IEnumerable<double> values, int width, int height, string lineColor, string fillColor)
+    private static string BuildSparklineSvg(IEnumerable<double> values, int width, int height, string lineColor, string fillColor, bool absoluteScale = false)
     {
         var pts = values.Select(v => Math.Clamp(v, 0, 100)).ToList();
         if (pts.Count < 2) return string.Empty;
@@ -341,9 +351,18 @@
         double pad = 2;
         double iw = width - 2 * pad;
         double ih = height - 2 * pad;
-        double min = pts.Min();
-        double max = pts.Max();
-        if (Math.Abs(max - min) < 0.001) { min = Math.Max(0, min - 5); max = Math.Min(100, max + 5); }
+        double min, max;
+        if (absoluteScale)
+        {
+            min = 0;
+            max = 100;
+        }
+        else
+        {
+            min = pts.Min();
+            max = pts.Max();
+            if (Math.Abs(max - min) < 0.001) { min = Math.Max(0, min - 5); max = Math.Min(100, max + 5); }
+        }
 
         var line = new System.Text.StringBuilder();
         var area = new System.Text.StringBuilder();
