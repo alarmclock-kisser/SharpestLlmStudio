@@ -1,6 +1,5 @@
 using System.Collections.Generic;
 using System.Drawing;
-using System.Drawing.Imaging;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Runtime.Versioning;
@@ -61,7 +60,7 @@ namespace SharpestLlmStudio.Runtime
                 yield break;
             }
 
-            var normalizedImages = await NormalizeImageInputsAsync(request.Images, cancellationToken);
+            var normalizedImages = await this.NormalizeImageInputsAsync(request, cancellationToken);
             try
             {
                 int sum = 0;
@@ -71,7 +70,8 @@ namespace SharpestLlmStudio.Runtime
                 }
                 if (sum > 0)
                 {
-                    await StaticLogger.LogAsync($"[LlamaCpp] Image inputs estimated total ~{sum} tokens across {_lastImageTokenEstimates.Count} item(s) — estimates per image: {string.Join(", ", _lastImageTokenEstimates.Select(kv => kv.Key + ":" + kv.Value))}");
+                    var perImage = _lastImageTokenEstimates.Values.Select((tokens, index) => $"img{index + 1}:{tokens}");
+                    await StaticLogger.LogAsync($"[LlamaCpp] Image inputs estimated total ~{sum} tokens across {_lastImageTokenEstimates.Count} item(s) — estimates per image: {string.Join(", ", perImage)}");
                 }
             }
             catch { }
@@ -428,13 +428,21 @@ namespace SharpestLlmStudio.Runtime
         }
 
         [SupportedOSPlatform("windows")]
-        private static async Task<List<string>> NormalizeImageInputsAsync(string[]? images, CancellationToken cancellationToken)
+        private async Task<List<string>> NormalizeImageInputsAsync(LlamaGenerationRequest request, CancellationToken cancellationToken)
         {
             var result = new List<string>();
+            _lastImageTokenEstimates.Clear();
+
+            var images = request.Images;
             if (images == null || images.Length == 0)
             {
                 return result;
             }
+
+            string targetFormat = string.IsNullOrWhiteSpace(request.ImageFormat)
+                ? "jpg"
+                : request.ImageFormat.Trim().ToLowerInvariant();
+            string outputMime = GetMimeTypeByImageFormat(targetFormat);
 
             foreach (var item in images)
             {
@@ -446,59 +454,67 @@ namespace SharpestLlmStudio.Runtime
                 var trimmed = item.Trim();
                 if (File.Exists(trimmed))
                 {
-                    string ext = Path.GetExtension(trimmed).ToLowerInvariant();
-                    if (ext is ".tif" or ".tiff")
+                    if (OperatingSystem.IsWindows())
                     {
-                        if (OperatingSystem.IsWindows())
-                        {
-                            var frames = ExtractTiffFramesAsBase64(trimmed);
-                            result.AddRange(frames);
+                        var maxDim = request.MaxWidthAndHeight;
+                        // If maxDim is 0, treat as disabled (no downsizing)
+                        int? maxDimForCall = (maxDim <= 0) ? null : maxDim;
+                        var serialized = await this.LoadAndSerializeImagesAsync(
+                            [trimmed],
+                            maxDimForCall,
+                            maxDimForCall,
+                            targetFormat);
 
-                            // Estimate tokens for each extracted frame and record
-                            try
-                            {
-                                using var img = Image.FromFile(trimmed);
-                                int frameCount = GetTiffFrameCount(img);
-                                for (int i = 0; i < frameCount; i++)
-                                {
-                                    // use same estimation logic as HomeViewModel (patch size 14)
-                                    int w = img.Width;
-                                    int h = img.Height;
-                                    int estimated = EstimateTokensForImageDimensions(w, h);
-                                    _lastImageTokenEstimates[$"{trimmed}#frame{i}"] = estimated;
-                                }
-                            }
-                            catch { }
-                        }
-                        else
+                        foreach (var base64 in serialized)
                         {
-                            byte[] tiffBytes = await File.ReadAllBytesAsync(trimmed, cancellationToken);
-                            result.Add($"data:image/tiff;base64,{Convert.ToBase64String(tiffBytes)}");
+                            string dataUrl = $"data:{outputMime};base64,{base64}";
+                            result.Add(dataUrl);
+                            TryEstimateTokensForBase64(base64, dataUrl);
                         }
-
-                        continue;
+                    }
+                    else
+                    {
+                        byte[] bytes = await File.ReadAllBytesAsync(trimmed, cancellationToken);
+                        string mime = GetMimeTypeByFileExtension(trimmed);
+                        result.Add($"data:{mime};base64,{Convert.ToBase64String(bytes)}");
                     }
 
-                    byte[] bytes = await File.ReadAllBytesAsync(trimmed, cancellationToken);
-                    string mime = GetMimeTypeByFileExtension(trimmed);
-                    result.Add($"data:{mime};base64,{Convert.ToBase64String(bytes)}");
                     continue;
                 }
 
-                if (trimmed.StartsWith("data:image/tiff", StringComparison.OrdinalIgnoreCase) || trimmed.StartsWith("data:image/tif", StringComparison.OrdinalIgnoreCase))
+                if (trimmed.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (OperatingSystem.IsWindows())
+                    if (OperatingSystem.IsWindows() && TryParseImageDataUrl(trimmed, out var mimeType, out var imageBytes))
                     {
-                        var frames = ExtractTiffFramesFromDataUrl(trimmed);
-                        foreach (var f in frames)
+                        string extension = GetExtensionForMimeType(mimeType);
+                        string tempFile = Path.Combine(Path.GetTempPath(), $"llm_img_{Guid.NewGuid():N}{extension}");
+
+                        try
                         {
-                            result.Add(f);
+                            await File.WriteAllBytesAsync(tempFile, imageBytes, cancellationToken);
+                            var maxDim2 = request.MaxWidthAndHeight;
+                            int? maxDimForCall2 = (maxDim2 <= 0) ? null : maxDim2;
+                            var serialized = await this.LoadAndSerializeImagesAsync(
+                                [tempFile],
+                                maxDimForCall2,
+                                maxDimForCall2,
+                                targetFormat);
+
+                            foreach (var base64 in serialized)
+                            {
+                                string dataUrl = $"data:{outputMime};base64,{base64}";
+                                result.Add(dataUrl);
+                                TryEstimateTokensForBase64(base64, dataUrl);
+                            }
+                        }
+                        finally
+                        {
                             try
                             {
-                                using var ms = new MemoryStream(Convert.FromBase64String(f.Substring(f.IndexOf(',') + 1)));
-                                using var img = Image.FromStream(ms);
-                                int estimated = EstimateTokensForImageDimensions(img.Width, img.Height);
-                                _lastImageTokenEstimates[f] = estimated;
+                                if (File.Exists(tempFile))
+                                {
+                                    File.Delete(tempFile);
+                                }
                             }
                             catch { }
                         }
@@ -508,27 +524,6 @@ namespace SharpestLlmStudio.Runtime
                         result.Add(trimmed);
                     }
 
-                    continue;
-                }
-
-                if (trimmed.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
-                {
-                    // try to estimate tokens for data urls (png/jpg)
-                    try
-                    {
-                        // attempt to get dimensions for png/jpeg by loading
-                        int commaIdx = trimmed.IndexOf(',');
-                        var meta = trimmed.Substring(5, commaIdx - 5); // e.g. image/png;base64
-                        var comma = trimmed.IndexOf(',');
-                        byte[] bytes = Convert.FromBase64String(trimmed[(comma + 1)..]);
-                        using var ms = new MemoryStream(bytes);
-                        using var img = Image.FromStream(ms);
-                        int est = EstimateTokensForImageDimensions(img.Width, img.Height);
-                        _lastImageTokenEstimates[$"dataurl#{result.Count}"] = est;
-                    }
-                    catch { }
-
-                    result.Add(trimmed);
                     continue;
                 }
 
@@ -542,6 +537,19 @@ namespace SharpestLlmStudio.Runtime
             }
 
             return result;
+        }
+
+        private static void TryEstimateTokensForBase64(string base64, string key)
+        {
+            try
+            {
+                using var ms = new MemoryStream(Convert.FromBase64String(base64));
+                using var img = Image.FromStream(ms);
+                _lastImageTokenEstimates[key] = EstimateTokensForImageDimensions(img.Width, img.Height);
+            }
+            catch
+            {
+            }
         }
 
         private static bool LooksLikeBase64(string value)
@@ -576,105 +584,61 @@ namespace SharpestLlmStudio.Runtime
             };
         }
 
-        /// <summary>
-        /// Extracts each page/frame of a multi-page TIFF file and converts to PNG base64 data URLs.
-        /// </summary>
-        [SupportedOSPlatform("windows")]
-        private static List<string> ExtractTiffFramesAsBase64(string filePath)
+        private static string GetMimeTypeByImageFormat(string format)
         {
-            var frames = new List<string>();
-            try
+            return format.ToLowerInvariant() switch
             {
-                using var image = Image.FromFile(filePath);
-                int frameCount = GetTiffFrameCount(image);
-
-                for (int i = 0; i < frameCount; i++)
-                {
-                    image.SelectActiveFrame(FrameDimension.Page, i);
-                    using var frameBitmap = new Bitmap(image.Width, image.Height);
-                    using (var g = Graphics.FromImage(frameBitmap))
-                    {
-                        g.DrawImage(image, 0, 0, image.Width, image.Height);
-                    }
-
-                    var dataUrl = BitmapToDataUrl(frameBitmap);
-                    frames.Add(dataUrl);
-                    try
-                    {
-                        int estimated = EstimateTokensForImageDimensions(frameBitmap.Width, frameBitmap.Height);
-                        _lastImageTokenEstimates[dataUrl] = estimated;
-                    }
-                    catch { }
-                }
-            }
-            catch (Exception ex)
-            {
-                StaticLogger.Log($"[LlamaCpp] Failed to extract TIFF frames from '{filePath}': {ex.Message}");
-            }
-
-            return frames;
+                "png" => "image/png",
+                "bmp" => "image/bmp",
+                "gif" => "image/gif",
+                _ => "image/jpeg"
+            };
         }
 
-        /// <summary>
-        /// Extracts each page/frame of a multi-page TIFF from a data:image/tiff;base64,... URL.
-        /// </summary>
-        [SupportedOSPlatform("windows")]
-        private static List<string> ExtractTiffFramesFromDataUrl(string dataUrl)
+        private static string GetExtensionForMimeType(string mimeType)
         {
-            var frames = new List<string>();
+            return mimeType.ToLowerInvariant() switch
+            {
+                "image/png" => ".png",
+                "image/bmp" => ".bmp",
+                "image/gif" => ".gif",
+                "image/tif" => ".tif",
+                "image/tiff" => ".tiff",
+                _ => ".jpg"
+            };
+        }
+
+        private static bool TryParseImageDataUrl(string dataUrl, out string mimeType, out byte[] imageBytes)
+        {
+            mimeType = string.Empty;
+            imageBytes = [];
+
             try
             {
                 int commaIdx = dataUrl.IndexOf(',');
-                if (commaIdx < 0)
+                if (commaIdx <= 0)
                 {
-                    return frames;
+                    return false;
                 }
 
-                byte[] tiffBytes = Convert.FromBase64String(dataUrl[(commaIdx + 1)..]);
-                using var ms = new MemoryStream(tiffBytes);
-                using var image = Image.FromStream(ms);
-                int frameCount = GetTiffFrameCount(image);
-
-                for (int i = 0; i < frameCount; i++)
+                string meta = dataUrl[..commaIdx];
+                if (!meta.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
                 {
-                    image.SelectActiveFrame(FrameDimension.Page, i);
-                    using var frameBitmap = new Bitmap(image.Width, image.Height);
-                    using (var g = Graphics.FromImage(frameBitmap))
-                    {
-                        g.DrawImage(image, 0, 0, image.Width, image.Height);
-                    }
-
-                    frames.Add(BitmapToDataUrl(frameBitmap));
+                    return false;
                 }
-            }
-            catch (Exception ex)
-            {
-                StaticLogger.Log($"[LlamaCpp] Failed to extract TIFF frames from data URL: {ex.Message}");
-            }
 
-            return frames;
-        }
-
-        [SupportedOSPlatform("windows")]
-        private static int GetTiffFrameCount(Image image)
-        {
-            try
-            {
-                var dimension = new FrameDimension(image.FrameDimensionsList[0]);
-                return image.GetFrameCount(dimension);
+                string header = meta[5..];
+                int semicolonIdx = header.IndexOf(';');
+                mimeType = semicolonIdx >= 0 ? header[..semicolonIdx] : header;
+                imageBytes = Convert.FromBase64String(dataUrl[(commaIdx + 1)..]);
+                return !string.IsNullOrWhiteSpace(mimeType) && imageBytes.Length > 0;
             }
             catch
             {
-                return 1;
+                mimeType = string.Empty;
+                imageBytes = [];
+                return false;
             }
-        }
-
-        [SupportedOSPlatform("windows")]
-        private static string BitmapToDataUrl(Bitmap bitmap)
-        {
-            using var ms = new MemoryStream();
-            bitmap.Save(ms, ImageFormat.Png);
-            return $"data:image/png;base64,{Convert.ToBase64String(ms.ToArray())}";
         }
 
         private static int EstimateTokensForImageDimensions(int width, int height)

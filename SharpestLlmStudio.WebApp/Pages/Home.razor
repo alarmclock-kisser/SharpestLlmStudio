@@ -301,6 +301,13 @@
                             @if (!string.IsNullOrWhiteSpace(VM.JsonOutputFormatFileName))
                             {
                                 <RadzenText TextStyle="TextStyle.Caption" Text="@($"Loaded: {VM.JsonOutputFormatFileName}")" />
+                                <RadzenButton Icon="close"
+                                              Size="ButtonSize.Small"
+                                              ButtonStyle="ButtonStyle.Danger"
+                                              Shade="Shade.Lighter"
+                                              Disabled="@VM.IsGenerating"
+                                              Click="@VM.ClearJsonOutputFormat"
+                                              title="Remove JSON format" />
                             }
                         </RadzenStack>
 
@@ -313,7 +320,7 @@
 
                         @if (VM.HasJsonOutputFormat)
                         {
-                            <RadzenTextArea Value="VM.JsonOutputFormatTemplate" Rows="6" ReadOnly="true" Style="width:100%;" Name="jsonOutputFormatPreview" />
+                            <RadzenTextArea Value="@VM.JsonOutputFormatTemplate" Rows="6" ReadOnly="true" Style="width:100%;" Name="jsonOutputFormatPreview" />
                         }
 
                         @if (VM.UseSystemPrompt)
@@ -343,6 +350,24 @@
                             <RadzenFormField Text="Top P" Variant="Variant.Outlined">
                                 <ChildContent>
                                     <RadzenNumeric @bind-Value="VM.GenTopP" TValue="float" Min="0" Max="1" Step="0.05" Style="width:110px;" />
+                                </ChildContent>
+                            </RadzenFormField>
+
+                            <RadzenFormField Text="Image Max Dim" Variant="Variant.Outlined">
+                                <ChildContent>
+                                    <RadzenNumeric Value="@VM.ImageMaxDimension"
+                                                   ValueChanged="@((int v) => VM.OnImageMaxDimensionChanged(v))"
+                                                   TValue="int"
+                                                   Min="0"
+                                                   Max="8192"
+                                                   Step="16"
+                                                   Style="@($"width:110px;color:{(VM.ImageMaxDimension == 0 ? "gray" : "black")};")" />
+                                </ChildContent>
+                            </RadzenFormField>
+
+                            <RadzenFormField Text="Image Format" Variant="Variant.Outlined">
+                                <ChildContent>
+                                    <RadzenDropDown @bind-Value="VM.ImageFormat" Data="@(new string[]{"jpg","png","bmp"})" Style="width:110px;" />
                                 </ChildContent>
                             </RadzenFormField>
                         </RadzenStack>

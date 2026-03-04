@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using SharpestLlmStudio.Shared;
@@ -172,6 +173,11 @@ namespace SharpestLlmStudio.Runtime
             try
             {
                 await this.ExecuteSlotActionAsync(slotId, "erase", null, cancellationToken);
+                return true;
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotImplemented || ex.Message.Contains("501"))
+            {
+                await StaticLogger.LogAsync("[LlamaCpp][Context] Erase endpoint is not implemented by this llama-server build. Local reset is applied and server erase is skipped.");
                 return true;
             }
             catch (Exception ex)

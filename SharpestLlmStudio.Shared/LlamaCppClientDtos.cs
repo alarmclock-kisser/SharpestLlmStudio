@@ -15,6 +15,8 @@ namespace SharpestLlmStudio.Shared
         public string Prompt { get; set; } = string.Empty;
         public string? SystemPrompt { get; set; }
         public string[]? Images { get; set; }
+        public int MaxWidthAndHeight { get; set; } = 720; // Set to 0 to disable downsizing and send full-size images
+        public string ImageFormat { get; set; } = "jpg"; // Format to use when downsizing and serializing images. Supported: "jpg", "png", "bmp"
 
         public bool Isolated { get; set; } = false;
         public bool PersistConversation { get; set; } = true;

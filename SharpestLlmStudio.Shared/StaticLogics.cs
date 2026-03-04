@@ -21,7 +21,11 @@ namespace SharpestLlmStudio.Shared
 
         public static string GetBaseKnowledgeKey(string key)
         {
-            if (string.IsNullOrWhiteSpace(key)) return key ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                return key ?? string.Empty;
+            }
+
             int idx = key.IndexOf(" [chunk ", StringComparison.OrdinalIgnoreCase);
             return idx >= 0 ? key.Substring(0, idx) : key;
         }
@@ -34,13 +38,20 @@ namespace SharpestLlmStudio.Shared
 
         public static string GetChunkPreview(string content)
         {
-            if (string.IsNullOrWhiteSpace(content)) return string.Empty;
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                return string.Empty;
+            }
+
             return content.Length <= 200 ? content : content.Substring(0, 200) + "...";
         }
 
         public static string GetDisplayContent(string content)
         {
-            if (string.IsNullOrWhiteSpace(content)) return content;
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                return content;
+            }
 
             const string knowledgeMarker = "Nutze die folgenden Wissenskontexte für die Antwort";
             const string userPromptMarker = "User Prompt:";
@@ -146,8 +157,15 @@ namespace SharpestLlmStudio.Shared
                 sb.Append("<p class=\"md-p\">").Append(InlineMarkdown(line)).Append("</p>");
             }
 
-            if (inList) sb.Append("</ul>");
-            if (inCodeBlock) sb.Append("</code></pre>");
+            if (inList)
+            {
+                sb.Append("</ul>");
+            }
+
+            if (inCodeBlock)
+            {
+                sb.Append("</code></pre>");
+            }
 
             return sb.ToString();
         }
@@ -208,7 +226,10 @@ namespace SharpestLlmStudio.Shared
             try
             {
                 var valsRaw = valuesInput.Select(v => Math.Clamp(v, 0.0, 100.0)).ToList();
-                if (valsRaw.Count == 0) return string.Empty;
+                if (valsRaw.Count == 0)
+                {
+                    return string.Empty;
+                }
 
                 int n = valsRaw.Count;
                 double pad = 6;

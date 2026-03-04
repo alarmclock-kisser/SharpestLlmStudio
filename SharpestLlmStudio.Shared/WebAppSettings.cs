@@ -23,6 +23,10 @@ namespace SharpestLlmStudio.Shared
         public int DefaultMaxTokens { get; set; } = 2048;
         public double DefaultTemperature { get; set; } = 0.7;
         public double DefaultRepetitionPenalty { get; set; } = 1.1;
+        // Image handling defaults for generation
+        // Use 0 to disable downsizing (send full-size images). Default is 720.
+        public int DefaultImageMaxDimension { get; set; } = 720;
+        public string DefaultImageFormat { get; set; } = "jpg";
 
 
 

@@ -39,7 +39,7 @@ namespace SharpestLlmStudio.Runtime
             }
             else
             {
-                var reused = await TryReuseExistingInstanceAsync(targetBaseUrl, request.ContextSize, request.BatchSize, cancellationToken);
+                var reused = await this.TryReuseExistingInstanceAsync(targetBaseUrl, request.ContextSize, request.BatchSize, cancellationToken);
                 if (reused != null)
                 {
                     return reused;

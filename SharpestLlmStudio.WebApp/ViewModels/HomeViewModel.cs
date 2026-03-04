@@ -74,6 +74,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public bool UseSystemPrompt { get; set; } = true;
         public bool IsolatedGeneration { get; set; } = false;
         public bool AutoSaveEnabled { get; set; } = true;
+        // Use 0 to disable downsizing (send full-size images). Default 720.
+        public int ImageMaxDimension { get; set; } = 720;
 
         private bool useJsonOutputFormat;
         public bool UseJsonOutputFormat
@@ -421,6 +423,35 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.Client = ApiClient;
             this.Js = js;
             this.Settings = webAppSettings;
+            // Initialize image preferences from settings defaults
+            this.ImageMaxDimension = Math.Max(0, this.Settings.DefaultImageMaxDimension);
+            this.ImageFormat = string.IsNullOrWhiteSpace(this.Settings.DefaultImageFormat) ? "jpg" : NormalizeImageFormat(this.Settings.DefaultImageFormat);
+        }
+
+        // Handle UI interaction for ImageMaxDimension numeric control.
+        // Steps of 16. If value snaps below 448, treat as 0 (disabled). When at 0 and user increments, go to 448.
+        public void OnImageMaxDimensionChanged(int newValue)
+        {
+            // If coming from 0 and user increments to positive small value, set to 448
+            if (this.ImageMaxDimension == 0 && newValue > 0 && newValue < 448)
+            {
+                this.ImageMaxDimension = 448;
+                this.RequestUiRefresh();
+                return;
+            }
+
+            // Snap to 0 if below 448
+            if (newValue > 0 && newValue < 448)
+            {
+                this.ImageMaxDimension = 0;
+                this.RequestUiRefresh();
+                return;
+            }
+
+            // Otherwise keep value rounded to nearest multiple of 16
+            int rounded = Math.Clamp((int)Math.Round(newValue / 16.0) * 16, 0, 8192);
+            this.ImageMaxDimension = rounded;
+            this.RequestUiRefresh();
         }
 
         private void StartAutoRefresh()
@@ -491,7 +522,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     if (attachResult?.Success == true)
                     {
                         this.IsLoaded = true;
-                        this.LoadedModel = ResolveModelFromServerId(attachResult.ActiveModelId) ?? this.LlamaModels.FirstOrDefault(m => m.Name.Equals(this.SelectedModelName, StringComparison.OrdinalIgnoreCase));
+                        this.LoadedModel = this.ResolveModelFromServerId(attachResult.ActiveModelId) ?? this.LlamaModels.FirstOrDefault(m => m.Name.Equals(this.SelectedModelName, StringComparison.OrdinalIgnoreCase));
                         this.IsReusedInstance = true;
                         if (this.LoadedModel != null)
                         {
@@ -538,6 +569,18 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public async Task ResetConversationAsync()
         {
             this.Client.ResetConversation();
+
+            bool serverContextCleared = await this.Client.ClearServerContextAsync();
+            if (!serverContextCleared && this.IsLoaded)
+            {
+                await StaticLogger.LogAsync("[HomeViewModel] Reset requested, but server context erase failed.");
+                this.LastActionMessage = "Conversation reset locally, but server context erase failed.";
+            }
+            else
+            {
+                this.LastActionMessage = "Conversation and server context reset.";
+            }
+
             this.GeneratedOutput = string.Empty;
             this.ChatMessages = [];
             // When resetting the conversation, clear any saved-context selection and
@@ -708,6 +751,17 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.RequestUiRefresh();
         }
 
+        public void ClearJsonOutputFormat()
+        {
+            this.JsonOutputFormatTemplate = string.Empty;
+            this.JsonOutputFormatFileName = null;
+            this.JsonOutputFormatWarning = null;
+            this.UseJsonOutputFormat = false;
+            this.LastActionMessage = "JSON output format removed.";
+            _ = StaticLogger.LogAsync("[HomeViewModel] JSON output format removed by user.");
+            this.RequestUiRefresh();
+        }
+
         public async Task LoadJsonOutputFormatAsync(IBrowserFile file, CancellationToken cancellationToken = default)
         {
             if (file == null)
@@ -822,6 +876,9 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     Temperature = this.GenTemperature,
                     RepetitionPenalty = (double)this.GenRepetitionPenalty,
                     TopP = this.GenTopP,
+                    // Pass image prefs from UI into the generation request
+                    MaxWidthAndHeight = this.ImageMaxDimension,
+                    ImageFormat = this.ImageFormat,
                     Stream = true,
                     SystemPrompt = this.BuildEffectiveSystemPrompt()
                 };
@@ -876,14 +933,21 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 }
 
                 // Sync UI chat messages from client — ring buffer may have trimmed oldest messages
-                this.SyncChatMessagesFromClient();
+                // Keep isolated output visible in UI; do not overwrite it from persistent history.
+                if (!this.IsolatedGeneration)
+                {
+                    this.SyncChatMessagesFromClient();
+                }
             }
             catch (OperationCanceledException)
             {
                 assistantMessage.Content = string.IsNullOrWhiteSpace(assistantText) ? "[Generation canceled]" : assistantText;
                 this.LastGenerationStats = this.Client.GetLastGenerationStatsSnapshot();
                 this.LastActionMessage = "Generation canceled.";
-                this.SyncChatMessagesFromClient();
+                if (!this.IsolatedGeneration)
+                {
+                    this.SyncChatMessagesFromClient();
+                }
             }
             catch (Exception ex)
             {
@@ -891,7 +955,10 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 assistantMessage.Content = string.IsNullOrWhiteSpace(assistantText) ? $"[Error] {ex.Message}" : assistantText;
                 this.LastGenerationStats = this.Client.GetLastGenerationStatsSnapshot();
                 await StaticLogger.LogAsync(ex, "[HomeViewModel] Error while generating response");
-                this.SyncChatMessagesFromClient();
+                if (!this.IsolatedGeneration)
+                {
+                    this.SyncChatMessagesFromClient();
+                }
             }
             finally
             {
@@ -1674,7 +1741,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                         this.IsLoaded = true;
                         this.IsReusedInstance = response.ReusedExistingInstance;
                         this.LoadedModel = response.ReusedExistingInstance
-                            ? (ResolveModelFromServerId(response.ActiveModelId) ?? modelToLoad)
+                            ? (this.ResolveModelFromServerId(response.ActiveModelId) ?? modelToLoad)
                             : modelToLoad;
                         if (this.LoadedModel != null)
                         {

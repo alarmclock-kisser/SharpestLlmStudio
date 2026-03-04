@@ -116,7 +116,10 @@ namespace SharpestLlmStudio.Runtime
                             // Try to parse the reported current batch size and derive a safe target
                             int reportedBatch = 0;
                             var m = Regex.Match(errorBody, "current batch size:\\s*(\\d+)", RegexOptions.IgnoreCase);
-                            if (m.Success && int.TryParse(m.Groups[1].Value, out var parsed)) reportedBatch = parsed;
+                            if (m.Success && int.TryParse(m.Groups[1].Value, out var parsed))
+                            {
+                                reportedBatch = parsed;
+                            }
 
                             int targetTokens = reportedBatch > 0 ? Math.Max(64, reportedBatch - 16) : 256;
                             const int charsPerToken = 3;
@@ -129,16 +132,31 @@ namespace SharpestLlmStudio.Runtime
                             {
                                 cancellationToken.ThrowIfCancellationRequested();
                                 var vec = await this.CreateSingleEmbeddingAsync(part, cancellationToken, suppressLogging: true, retrySplitLevel: retrySplitLevel + 1);
-                                if (vec.Length == 0) continue;
+                                if (vec.Length == 0)
+                                {
+                                    continue;
+                                }
 
-                                if (accumulated == null) accumulated = new float[vec.Length];
-                                for (int i = 0; i < Math.Min(accumulated.Length, vec.Length); i++) accumulated[i] += vec[i];
+                                if (accumulated == null)
+                                {
+                                    accumulated = new float[vec.Length];
+                                }
+
+                                for (int i = 0; i < Math.Min(accumulated.Length, vec.Length); i++)
+                                {
+                                    accumulated[i] += vec[i];
+                                }
+
                                 partCount++;
                             }
 
                             if (accumulated != null && partCount > 0)
                             {
-                                for (int i = 0; i < accumulated.Length; i++) accumulated[i] /= partCount;
+                                for (int i = 0; i < accumulated.Length; i++)
+                                {
+                                    accumulated[i] /= partCount;
+                                }
+
                                 await StaticLogger.LogAsync($"[LlamaCpp] Embedding retry: split into {partCount} parts due to server batch size limit. (retryLevel={retrySplitLevel})");
                                 this.TouchServerActivity();
                                 return accumulated;
@@ -473,7 +491,11 @@ namespace SharpestLlmStudio.Runtime
                         int canFit = remainingKnowledgeChars - header.Length - 4;
                         if (canFit > 100)
                         {
-                            if (!string.IsNullOrEmpty(header)) sb.AppendLine(header);
+                            if (!string.IsNullOrEmpty(header))
+                            {
+                                sb.AppendLine(header);
+                            }
+
                             sb.AppendLine(content.Substring(0, canFit));
                             sb.AppendLine();
                             addedAnyContext = true;
@@ -483,7 +505,11 @@ namespace SharpestLlmStudio.Runtime
                     continue;
                 }
 
-                if (!string.IsNullOrEmpty(header)) sb.AppendLine(header);
+                if (!string.IsNullOrEmpty(header))
+                {
+                    sb.AppendLine(header);
+                }
+
                 sb.AppendLine(content);
                 sb.AppendLine();
 
@@ -503,7 +529,10 @@ namespace SharpestLlmStudio.Runtime
 
         private static bool IsBroadKnowledgeQuery(string query)
         {
-            if (string.IsNullOrWhiteSpace(query)) return false;
+            if (string.IsNullOrWhiteSpace(query))
+            {
+                return false;
+            }
 
             string[] broadPatterns =
             [
