@@ -97,6 +97,38 @@ window.sharpestNavMenu = {
         }
     },
 
+    bindFooterOffset: function (scrollerId, footerId, minOffsetPx) {
+        const scroller = document.getElementById(scrollerId);
+        const footer = document.getElementById(footerId);
+        if (!scroller || !footer) return;
+
+        const update = function () {
+            const footerHeight = Math.ceil(footer.getBoundingClientRect().height || 0);
+            const minHeight = Number.isFinite(minOffsetPx) ? minOffsetPx : 0;
+            const offset = Math.max(minHeight, footerHeight);
+            scroller.style.setProperty('--chat-footer-offset', `${offset}px`);
+        };
+
+        update();
+
+        if (scroller._footerResizeObserver) {
+            scroller._footerResizeObserver.disconnect();
+        }
+
+        if (typeof ResizeObserver !== 'undefined') {
+            const resizeObserver = new ResizeObserver(() => update());
+            resizeObserver.observe(footer);
+            scroller._footerResizeObserver = resizeObserver;
+        }
+
+        if (scroller._footerWindowResizeHandler) {
+            window.removeEventListener('resize', scroller._footerWindowResizeHandler);
+        }
+
+        scroller._footerWindowResizeHandler = update;
+        window.addEventListener('resize', scroller._footerWindowResizeHandler, { passive: true });
+    },
+
     setupVerticalResizeHandle: function (handleId, targetId, minHeight, maxHeight) {
         const handle = document.getElementById(handleId);
         const target = document.getElementById(targetId);
@@ -151,5 +183,53 @@ window.sharpestNavMenu = {
                 resolve([0, 0]);
             }
         });
+    },
+
+    setupClipboardImagePaste: function (elementId, dotNetRef) {
+        const el = document.getElementById(elementId);
+        if (!el) return;
+        if (el._clipboardPasteHandler) {
+            el.removeEventListener('paste', el._clipboardPasteHandler);
+        }
+        el._clipboardPasteHandler = function (e) {
+            const items = (e.clipboardData || window.clipboardData)?.items;
+            if (!items) return;
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
+                if (item.type.indexOf('image') !== -1) {
+                    e.preventDefault();
+                    const blob = item.getAsFile();
+                    if (!blob) continue;
+                    const reader = new FileReader();
+                    reader.onloadend = function () {
+                        const dataUrl = reader.result;
+                        if (dataUrl && typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) {
+                            dotNetRef.invokeMethodAsync('OnClipboardImagePasted', dataUrl, blob.type || 'image/png');
+                        }
+                    };
+                    reader.readAsDataURL(blob);
+                    break;
+                }
+            }
+        };
+        el.addEventListener('paste', el._clipboardPasteHandler);
+    },
+
+    getPrefersDarkMode: function () {
+        return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    },
+
+    applyDarkMode: function (isDark) {
+        document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
+
+        // Swap Radzen theme stylesheet
+        const radzenLink = document.querySelector('link[href*="material-"]');
+        if (radzenLink) {
+            if (isDark) {
+                radzenLink.href = radzenLink.href.replace('material-base.css', 'material-dark-base.css');
+            } else {
+                radzenLink.href = radzenLink.href.replace('material-dark-base.css', 'material-base.css');
+            }
+        }
     }
 };

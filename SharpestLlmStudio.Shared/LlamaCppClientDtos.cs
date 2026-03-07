@@ -60,4 +60,54 @@ namespace SharpestLlmStudio.Shared
         public int Height { get; init; }
         public long FileSizeBytes { get; init; }
     }
+
+    public sealed class LlamaCommandRequest
+    {
+        public string Command { get; set; } = string.Empty;
+        public string? WorkingDirectory { get; set; }
+        public bool ShowWindow { get; set; }
+        public string SourceSnippet { get; set; } = string.Empty;
+    }
+
+    public sealed class LlamaCommandSafetyAssessment
+    {
+        public string SafetyLevel { get; set; } = "ReadOnly"; // ReadOnly | Elevated | Blocked
+        public bool IsBlocked { get; set; }
+        public bool RequiresAdditionalConfirmation { get; set; }
+        public string Reason { get; set; } = string.Empty;
+    }
+
+    public sealed class LlamaCommandExecutionResult
+    {
+        public bool Success { get; set; }
+        public int ExitCode { get; set; }
+        public string Command { get; set; } = string.Empty;
+        public string WorkingDirectory { get; set; } = string.Empty;
+        public string StandardOutput { get; set; } = string.Empty;
+        public string StandardError { get; set; } = string.Empty;
+        public string? ErrorMessage { get; set; }
+        public DateTime StartedAtUtc { get; set; }
+        public DateTime FinishedAtUtc { get; set; }
+    }
+
+    public sealed class LlamaWebSearchRequest
+    {
+        public string Query { get; set; } = string.Empty;
+        public string? Url { get; set; }
+        public bool IsDirectUrl { get; set; }
+        public string SourceSnippet { get; set; } = string.Empty;
+    }
+
+    public sealed class LlamaWebSearchResult
+    {
+        public bool Success { get; set; }
+        public string EffectiveUrl { get; set; } = string.Empty;
+        public string Query { get; set; } = string.Empty;
+        public int StatusCode { get; set; }
+        public string HtmlPreview { get; set; } = string.Empty;
+        public string TextPreview { get; set; } = string.Empty;
+        public string? ErrorMessage { get; set; }
+        public DateTime StartedAtUtc { get; set; }
+        public DateTime FinishedAtUtc { get; set; }
+    }
 }

@@ -14,35 +14,38 @@
 
 <PageTitle>Home – SharpestLlmStudio</PageTitle>
 
-<RadzenStack Gap="1rem" class="home-shell">
-    @if (!string.IsNullOrWhiteSpace(VM.LastActionMessage))
-    {
-        <RadzenAlert AlertStyle="AlertStyle.Info" Shade="Shade.Lighter" ShowIcon="true">@VM.LastActionMessage</RadzenAlert>
-    }
-
-
-    <RadzenCard class="chat-card">
-        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" class="rz-mb-2">
-            <div style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;" @onclick="VM.ToggleModelPanelAsync">
-                <RadzenIcon Icon="memory" />
-                <RadzenText TextStyle="TextStyle.H5" Text="Model Management" class="rz-mb-0" />
-            </div>
-            <div style="flex:1"></div>
-            @if (!VM.IsModelPanelExpanded)
+<div class="page-wrapper">
+    <div class="top-panels-container">
+        <div id="top-panels-content" class="top-panels-content">
+            <RadzenStack Gap="1rem" class="home-shell">
+            @if (!string.IsNullOrWhiteSpace(VM.LastActionMessage))
             {
-                <RadzenBadge BadgeStyle="@(VM.IsLoaded ? BadgeStyle.Success : BadgeStyle.Danger)"
-                             Text="@(VM.IsLoaded ? "Loaded" : "Not Loaded")" />
-                @if (VM.IsReusedInstance)
-                {
-                    <RadzenBadge BadgeStyle="BadgeStyle.Info" Text="Reused instance" />
-                }
-                @if (VM.IsLoaded && VM.LoadedModel != null)
-                {
-                    <RadzenText class="collapsed-model-name" Text="@($"({VM.LoadedModel.Name})")" TextStyle="TextStyle.Caption" />
-                }
+                <RadzenAlert AlertStyle="@(VM.LastActionIsAllowedNonAdminCommand ? AlertStyle.Success : AlertStyle.Info)" Shade="Shade.Lighter" ShowIcon="true">@VM.LastActionMessage</RadzenAlert>
             }
-            <RadzenButton Icon="@(VM.IsModelPanelExpanded ? "remove" : "add")" Size="ButtonSize.Small" class="collapse-btn" Click="VM.ToggleModelPanelAsync" />
-        </RadzenStack>
+
+
+            <RadzenCard>
+                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" class="rz-mb-2">
+                    <div style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;" @onclick="VM.ToggleModelPanelAsync">
+                        <RadzenIcon Icon="memory" />
+                        <RadzenText TextStyle="TextStyle.H5" Text="Model Management" class="rz-mb-0" />
+                    </div>
+                    <div style="flex:1"></div>
+                    @if (!VM.IsModelPanelExpanded)
+                    {
+                        <RadzenBadge BadgeStyle="@(VM.IsLoaded ? BadgeStyle.Success : BadgeStyle.Danger)"
+                                     Text="@(VM.IsLoaded ? "Loaded" : "Not Loaded")" />
+                        @if (VM.IsReusedInstance)
+                        {
+                            <RadzenBadge BadgeStyle="BadgeStyle.Info" Text="Reused instance" />
+                        }
+                        @if (VM.IsLoaded && VM.LoadedModel != null)
+                        {
+                            <RadzenText class="collapsed-model-name" Text="@($"({VM.LoadedModel.Name})")" TextStyle="TextStyle.Caption" />
+                        }
+                    }
+                    <RadzenButton Icon="@(VM.IsModelPanelExpanded ? "remove" : "add")" Size="ButtonSize.Small" class="collapse-btn" Click="VM.ToggleModelPanelAsync" />
+                </RadzenStack>
 
         <div class="collapsible @(VM.IsModelPanelExpanded ? "expanded" : "collapsed")">
             <RadzenStack Gap="1rem" class="collapsible-inner">
@@ -249,17 +252,21 @@
         </div>
     </RadzenCard>
 
-    <RadzenCard>
+            </RadzenStack>
+        </div>
+        <div id="top-panels-resize-handle" class="top-panels-resize-handle" title="Drag to resize">
+            <RadzenIcon Icon="drag_indicator" />
+        </div>
+    </div>
+
+    <div id="chat-output" class="page-content">
+        <div class="home-shell">
+    <RadzenCard class="chat-card">
         <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" JustifyContent="JustifyContent.SpaceBetween" class="rz-mb-2">
             <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
                 <RadzenIcon Icon="chat" />
                 <RadzenText TextStyle="TextStyle.H5" Text="Chat / Generate" class="rz-mb-0" />
             </RadzenStack>
-
-            @if (VM.MonitoringEnabled && VM.LastGenerationStats != null)
-            {
-                <RadzenText TextStyle="TextStyle.Caption" class="generation-stats-caption" Text="@VM.GenerationStatsSummary" />
-            }
 
             <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
                 <RadzenBadge BadgeStyle="@(VM.IsGenerating ? BadgeStyle.Warning : BadgeStyle.Success)" Text="@(VM.IsGenerating ? "Generating" : "Idle")" />
@@ -271,172 +278,242 @@
             </RadzenStack>
         </RadzenStack>
 
-        <RadzenStack Gap="0.75rem" class="chat-card-stack">
-            <RadzenCard Variant="Variant.Flat" class="gen-settings-card">
-                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
-                    <RadzenIcon Icon="tune" Style="font-size:1rem;" />
-                    <RadzenText TextStyle="TextStyle.Subtitle2" Text="Generation Settings" class="rz-mb-0" />
-                    <div style="flex:1"></div>
-                    <RadzenButton Icon="@(VM.GenSettingsExpanded ? "remove" : "add")" Size="ButtonSize.Small" class="collapse-btn" Click="VM.ToggleGenSettingsAsync" />
-                </RadzenStack>
-
-                <div class="collapsible @(VM.GenSettingsExpanded ? "expanded" : "collapsed")">
-                    <RadzenStack Gap="0.6rem" class="collapsible-inner">
-                        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.75rem" Wrap="FlexWrap.Wrap">
-                            <RadzenCheckBox TValue="bool" @bind-Value="VM.IsolatedGeneration" Name="isolatedGeneration" />
-                            <RadzenLabel Text="Isolated (stateless)" Component="isolatedGeneration" />
-
-                            <RadzenCheckBox TValue="bool" @bind-Value="VM.UseSystemPrompt" Name="useSystemPrompt" />
-                            <RadzenLabel Text="System Prompt" Component="useSystemPrompt" />
-
-                            <RadzenCheckBox TValue="bool" @bind-Value="VM.AutoSaveEnabled" Name="autoSaveGeneration" />
-                            <RadzenLabel Text="Auto Save Context" Component="autoSaveGeneration" />
-                        </RadzenStack>
-
-                        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.75rem" Wrap="FlexWrap.Wrap">
-                            <RadzenButton Text="Browse JSON Format" Icon="data_object" ButtonStyle="ButtonStyle.Light" Disabled="@VM.IsGenerating" Click="VM.BrowseJsonFormatClickAsync" />
-                            <InputFile id="jsonFormatPicker" OnChange="VM.OnJsonFormatSelectedAsync" accept=".json,application/json" style="display:none;" />
-
-                            <RadzenCheckBox TValue="bool" @bind-Value="VM.UseJsonOutputFormat" Name="useJsonOutputFormat" Disabled="@(!VM.HasJsonOutputFormat)" />
-                            <RadzenLabel Text="Formatted Output (JSON)" Component="useJsonOutputFormat" />
-
-                            @if (!string.IsNullOrWhiteSpace(VM.JsonOutputFormatFileName))
-                            {
-                                <RadzenText TextStyle="TextStyle.Caption" Text="@($"Loaded: {VM.JsonOutputFormatFileName}")" />
-                                <RadzenButton Icon="close"
-                                              Size="ButtonSize.Small"
-                                              ButtonStyle="ButtonStyle.Danger"
-                                              Shade="Shade.Lighter"
-                                              Disabled="@VM.IsGenerating"
-                                              Click="@VM.ClearJsonOutputFormat"
-                                              title="Remove JSON format" />
-                            }
-                        </RadzenStack>
-
-                        @if (!string.IsNullOrWhiteSpace(VM.JsonOutputFormatWarning))
-                        {
-                            <RadzenAlert AlertStyle="AlertStyle.Warning" Shade="Shade.Lighter" ShowIcon="true">
-                                @VM.JsonOutputFormatWarning
-                            </RadzenAlert>
-                        }
-
-                        @if (VM.HasJsonOutputFormat)
-                        {
-                            <RadzenTextArea Value="@VM.JsonOutputFormatTemplate" Rows="6" ReadOnly="true" Style="width:100%;" Name="jsonOutputFormatPreview" />
-                        }
-
-                        @if (VM.UseSystemPrompt)
-                        {
-                            <RadzenTextArea @bind-Value="VM.SystemPrompt" Rows="2" Placeholder="System prompt..." Style="width:100%;" Name="systemPromptInput" />
-                        }
-
-                        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap">
-                            <RadzenFormField Text="Max Tokens" Variant="Variant.Outlined">
-                                <ChildContent>
-                                    <RadzenNumeric @bind-Value="VM.GenMaxTokens" TValue="int" Min="0" Max="8192" Step="32" Style="width:110px;" />
-                                </ChildContent>
-                            </RadzenFormField>
-
-                            <RadzenFormField Text="Temperature" Variant="Variant.Outlined">
-                                <ChildContent>
-                                    <RadzenNumeric @bind-Value="VM.GenTemperature" TValue="float" Min="0" Max="2" Step="0.1" Style="width:110px;" />
-                                </ChildContent>
-                            </RadzenFormField>
-
-                            <RadzenFormField Text="Repetition Penalty" Variant="Variant.Outlined">
-                                <ChildContent>
-                                    <RadzenNumeric @bind-Value="VM.GenRepetitionPenalty" TValue="decimal" Min="0.1m" Max="10m" Step="0.1m" Style="width:140px;" />
-                                </ChildContent>
-                            </RadzenFormField>
-
-                            <RadzenFormField Text="Top P" Variant="Variant.Outlined">
-                                <ChildContent>
-                                    <RadzenNumeric @bind-Value="VM.GenTopP" TValue="float" Min="0" Max="1" Step="0.05" Style="width:110px;" />
-                                </ChildContent>
-                            </RadzenFormField>
-
-                            <RadzenFormField Text="Image Max Dim" Variant="Variant.Outlined">
-                                <ChildContent>
-                                    <RadzenNumeric Value="@VM.ImageMaxDimension"
-                                                   ValueChanged="@((int v) => VM.OnImageMaxDimensionChanged(v))"
-                                                   TValue="int"
-                                                   Min="0"
-                                                   Max="8192"
-                                                   Step="16"
-                                                   Style="@($"width:110px;color:{(VM.ImageMaxDimension == 0 ? "gray" : "black")};")" />
-                                </ChildContent>
-                            </RadzenFormField>
-
-                            <RadzenFormField Text="Image Format" Variant="Variant.Outlined">
-                                <ChildContent>
-                                    <RadzenDropDown @bind-Value="VM.ImageFormat" Data="@(new string[]{"jpg","png","bmp"})" Style="width:110px;" />
-                                </ChildContent>
-                            </RadzenFormField>
-                        </RadzenStack>
-                    </RadzenStack>
-                </div>
-            </RadzenCard>
-
-            <textarea id="promptInput"
-                      @bind="VM.UserInput"
-                      @bind:event="oninput"
-                      rows="4"
-                      placeholder="Enter your prompt..."
-                      class="prompt-textarea"
-                      disabled="@(!VM.IsLoaded || VM.IsBusy)"></textarea>
-
-            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap">
-                <RadzenButton Text="Browse Images" Icon="image_search" ButtonStyle="ButtonStyle.Light" Click="VM.BrowseImagesClickAsync" Disabled="@VM.IsGenerating" />
-                <InputFile id="imagePicker" OnChange="VM.OnImagesSelectedAsync" multiple accept="image/*,.tif,.tiff" style="display:none;" />
-
-                <RadzenButton Text="Generate" Icon="send" ButtonStyle="ButtonStyle.Primary" Disabled="@(!VM.CanSend || !VM.IsLoaded || VM.IsBusy)" Click="@VM.StartGenerationAsync" />
-                <RadzenButton Text="Cancel" Icon="stop" ButtonStyle="ButtonStyle.Warning" Disabled="@(!VM.IsGenerating)" Click="@VM.CancelGeneration" />
-                <RadzenButton Text="Reset" Icon="restart_alt" ButtonStyle="ButtonStyle.Light" Disabled="@(VM.IsGenerating)" Click="@VM.ResetConversationAsync" />
-            </RadzenStack>
-
-            @if (VM.SelectedImagePaths.Count > 0)
+        @if (VM.ChatMessages.Count == 0)
+        {
+            <RadzenText TextStyle="TextStyle.Caption" Text="No conversation yet. Load a model and start with a prompt or load a previous context." />
+        }
+        else
+        {
+            @foreach (var message in VM.ChatMessages)
             {
-                <RadzenCard Variant="Variant.Flat" class="image-files-card">
-                    <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" class="rz-mb-1">
-                        <RadzenText TextStyle="TextStyle.Subtitle2" Text="@($"Image Attachments ({VM.SelectedImagePaths.Count})")" />
+                <div class="chat-message @message.Role">
+                    <div class="chat-role">@message.Role.ToUpperInvariant()</div>
+                    <div class="chat-content">@((MarkupString) VM.RenderChatContent(message.Content ?? string.Empty))</div>
+                </div>
+            }
+        }
+    </RadzenCard>
+        </div>
+    </div>
+
+    <div id="chat-footer" class="chat-footer">
+                @if (VM.HasPendingCommandRequest)
+                {
+                    <RadzenAlert AlertStyle="AlertStyle.Warning" Shade="Shade.Lighter" ShowIcon="true" class="chat-footer-section">
+                        <div><strong>Pending Command Request</strong></div>
+                        @if (VM.PendingCommandSafety != null)
+                        {
+                            <div style="margin-top:0.2rem;"><strong>Safety:</strong> @VM.PendingCommandSafety.SafetyLevel</div>
+                            <div style="white-space:pre-wrap;opacity:0.9;">@VM.PendingCommandSafety.Reason</div>
+                        }
+                        <div style="white-space:pre-wrap;margin-top:0.3rem;">@VM.PendingCommandRequest!.Command</div>
+                        <RadzenStack Orientation="Orientation.Horizontal" Gap="0.5rem" class="rz-mt-2">
+                            <RadzenButton Text="Run Command" Icon="terminal" ButtonStyle="ButtonStyle.Warning" Disabled="@VM.IsGenerating" Click="@VM.ConfirmPendingCommandAsync" />
+                            <RadzenButton Text="Reject" Icon="close" ButtonStyle="ButtonStyle.Light" Disabled="@VM.IsGenerating" Click="@VM.RejectPendingCommand" />
+                        </RadzenStack>
+                    </RadzenAlert>
+                }
+
+                @if (VM.HasPendingWebSearchRequest)
+                {
+                    <RadzenAlert AlertStyle="AlertStyle.Info" Shade="Shade.Lighter" ShowIcon="true" class="chat-footer-section">
+                        <div><strong>Pending Web Search Request</strong></div>
+                        <div style="white-space:pre-wrap;margin-top:0.3rem;">
+                            @(VM.PendingWebSearchRequest!.IsDirectUrl
+                                ? VM.PendingWebSearchRequest.Url
+                                : VM.PendingWebSearchRequest.Query)
+                        </div>
+                        <RadzenStack Orientation="Orientation.Horizontal" Gap="0.5rem" class="rz-mt-2">
+                            <RadzenButton Text="Run Search" Icon="travel_explore" ButtonStyle="ButtonStyle.Info" Disabled="@VM.IsGenerating" Click="@VM.ConfirmPendingWebSearchAsync" />
+                            <RadzenButton Text="Reject" Icon="close" ButtonStyle="ButtonStyle.Light" Disabled="@VM.IsGenerating" Click="@VM.RejectPendingWebSearch" />
+                        </RadzenStack>
+                    </RadzenAlert>
+                }
+
+                <RadzenCard Variant="Variant.Flat" class="gen-settings-card chat-footer-section">
+                    <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
+                        <RadzenIcon Icon="tune" Style="font-size:1rem;" />
+                        <RadzenText TextStyle="TextStyle.Subtitle2" Text="Generation Settings" class="rz-mb-0" />
                         <div style="flex:1"></div>
-                        <RadzenButton Icon="@(VM.ImageAttachmentsExpanded ? "remove" : "add")" Size="ButtonSize.Small" class="collapse-btn" Click="VM.ToggleImageAttachments" />
+                        @if (VM.MonitoringEnabled && VM.LastGenerationStats != null)
+                        {
+                            // Vertical stack or div
+                            <div style="display:flex;flex-direction:column;gap:0.1rem;font-size:0.75rem;text-align:right;">
+                                <RadzenText TextStyle="TextStyle.Caption" class="generation-stats-caption generation-stats-in-footer" Text="@VM.GenerationStatsLast" />
+                                <RadzenText TextStyle="TextStyle.Caption" class="generation-stats-caption generation-stats-in-footer" Text="@VM.GenerationStatsContingent" />
+                            </div>
+                        }
+                        <RadzenButton Icon="@(VM.GenSettingsExpanded ? "remove" : "add")" Size="ButtonSize.Small" class="collapse-btn" Click="VM.ToggleGenSettingsAsync" />
                     </RadzenStack>
 
-                    <div class="collapsible @(VM.ImageAttachmentsExpanded ? "expanded" : "collapsed")">
-                        <div class="image-chip-wrap collapsible-inner">
-                            @foreach (var image in VM.SelectedImagePaths.ToList())
+                    <div class="collapsible @(VM.GenSettingsExpanded ? "expanded" : "collapsed")">
+                        <RadzenStack Gap="0.6rem" class="collapsible-inner">
+                            <div class="settings-group-title">General</div>
+                            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.4rem" Wrap="FlexWrap.Wrap" class="settings-option-row">
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem" class="settings-toggle-item">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.IsolatedGeneration" Name="isolatedGeneration" />
+                                    <RadzenLabel Text="Isolated (stateless)" Component="isolatedGeneration" />
+                                </RadzenStack>
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem" class="settings-toggle-item">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.UseSystemPrompt" Name="useSystemPrompt" />
+                                    <RadzenLabel Text="System Prompt" Component="useSystemPrompt" />
+                                </RadzenStack>
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem" class="settings-toggle-item">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.AutoSaveEnabled" Name="autoSaveGeneration" />
+                                    <RadzenLabel Text="Auto Save Context" Component="autoSaveGeneration" />
+                                </RadzenStack>
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem" class="settings-toggle-item">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.AutoScrollEnabled" Name="autoScrollGeneration" />
+                                    <RadzenLabel Text="Auto Scroll" Component="autoScrollGeneration" />
+                                </RadzenStack>
+                            </RadzenStack>
+
+                            <div class="settings-group-title">Agent Tools</div>
+                            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.4rem" Wrap="FlexWrap.Wrap" class="settings-option-row">
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem" class="settings-toggle-item">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.EnableCommandAgentMode" Name="enableCommandAgentMode" />
+                                    <RadzenLabel Text="Command" Component="enableCommandAgentMode" />
+                                </RadzenStack>
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem" class="settings-toggle-item">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.EnableWebSearchAgentMode" Name="enableWebSearchAgentMode" />
+                                    <RadzenLabel Text="Web Search" Component="enableWebSearchAgentMode" />
+                                </RadzenStack>
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem" class="settings-toggle-item">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.AutoContinueAgentActions" Name="autoContinueAgentActions" />
+                                    <RadzenLabel Text="Auto Continue" Component="autoContinueAgentActions" />
+                                </RadzenStack>
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem" class="settings-toggle-item">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.AgentShowCommandWindow" Name="agentShowCmdWindow" />
+                                    <RadzenLabel Text="Show CMD Window" Component="agentShowCmdWindow" />
+                                </RadzenStack>
+                            </RadzenStack>
+
+                            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.75rem" Wrap="FlexWrap.Wrap">
+                                <RadzenButton Text="Browse JSON Format" Icon="data_object" ButtonStyle="ButtonStyle.Light" Disabled="@VM.IsGenerating" Click="VM.BrowseJsonFormatClickAsync" />
+                                <InputFile id="jsonFormatPicker" OnChange="VM.OnJsonFormatSelectedAsync" accept=".json,application/json" style="display:none;" />
+
+                                <RadzenCheckBox TValue="bool" @bind-Value="VM.UseJsonOutputFormat" Name="useJsonOutputFormat" Disabled="@(!VM.HasJsonOutputFormat)" />
+                                <RadzenLabel Text="Formatted Output (JSON)" Component="useJsonOutputFormat" />
+
+                                @if (!string.IsNullOrWhiteSpace(VM.JsonOutputFormatFileName))
+                                {
+                                    <RadzenText TextStyle="TextStyle.Caption" Text="@($"Loaded: {VM.JsonOutputFormatFileName}")" />
+                                    <RadzenButton Icon="close"
+                                                  Size="ButtonSize.Small"
+                                                  ButtonStyle="ButtonStyle.Danger"
+                                                  Shade="Shade.Lighter"
+                                                  Disabled="@VM.IsGenerating"
+                                                  Click="@VM.ClearJsonOutputFormat"
+                                                  title="Remove JSON format" />
+                                }
+                            </RadzenStack>
+
+                            @if (!string.IsNullOrWhiteSpace(VM.JsonOutputFormatWarning))
                             {
-                                var img = image;
-                                <span class="image-chip">
-                                    <span class="image-chip-label">@VM.GetImageDisplayLabel(img)</span>
-                                    <button type="button" class="image-chip-remove" @onclick="() => VM.RemoveImagePath(img)">✕</button>
-                                </span>
+                                <RadzenAlert AlertStyle="AlertStyle.Warning" Shade="Shade.Lighter" ShowIcon="true">
+                                    @VM.JsonOutputFormatWarning
+                                </RadzenAlert>
                             }
-                        </div>
+
+                            @if (VM.HasJsonOutputFormat)
+                            {
+                                <RadzenTextArea Value="@VM.JsonOutputFormatTemplate" Rows="6" ReadOnly="true" Style="width:100%;" Name="jsonOutputFormatPreview" />
+                            }
+
+                            @if (VM.UseSystemPrompt)
+                            {
+                                <RadzenTextArea @bind-Value="VM.SystemPrompt" Rows="2" Placeholder="System prompt..." Style="width:100%;" Name="systemPromptInput" />
+                            }
+
+                            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap">
+                                <RadzenFormField Text="Max Tokens" Variant="Variant.Outlined">
+                                    <ChildContent>
+                                        <RadzenNumeric @bind-Value="VM.GenMaxTokens" TValue="int" Min="0" Max="8192" Step="32" Style="width:110px;" />
+                                    </ChildContent>
+                                </RadzenFormField>
+
+                                <RadzenFormField Text="Temperature" Variant="Variant.Outlined">
+                                    <ChildContent>
+                                        <RadzenNumeric @bind-Value="VM.GenTemperature" TValue="float" Min="0" Max="2" Step="0.1" Style="width:110px;" />
+                                    </ChildContent>
+                                </RadzenFormField>
+
+                                <RadzenFormField Text="Repetition Penalty" Variant="Variant.Outlined">
+                                    <ChildContent>
+                                        <RadzenNumeric @bind-Value="VM.GenRepetitionPenalty" TValue="decimal" Min="0.1m" Max="10m" Step="0.1m" Style="width:140px;" />
+                                    </ChildContent>
+                                </RadzenFormField>
+
+                                <RadzenFormField Text="Top P" Variant="Variant.Outlined">
+                                    <ChildContent>
+                                        <RadzenNumeric @bind-Value="VM.GenTopP" TValue="float" Min="0" Max="1" Step="0.05" Style="width:110px;" />
+                                    </ChildContent>
+                                </RadzenFormField>
+
+                                <RadzenFormField Text="Image Max Dim" Variant="Variant.Outlined">
+                                    <ChildContent>
+                                        <RadzenNumeric Value="@VM.ImageMaxDimension"
+                                                       ValueChanged="@((int v) => VM.OnImageMaxDimensionChanged(v))"
+                                                       TValue="int"
+                                                       Min="0"
+                                                       Max="8192"
+                                                       Step="16"
+                                                       Style="@($"width:110px;color:{(VM.ImageMaxDimension == 0 ? "gray" : "black")}")" />
+                                    </ChildContent>
+                                </RadzenFormField>
+
+                                 <RadzenFormField Text="Image Format" Variant="Variant.Outlined">
+                                    <ChildContent>
+                                        <RadzenDropDown @bind-Value="VM.ImageFormat" Data="@(new string[]{"jpg","png","bmp"})" Style="width:110px;" />
+                                    </ChildContent>
+                                </RadzenFormField>
+                            </RadzenStack>
+                        </RadzenStack>
                     </div>
                 </RadzenCard>
-            }
 
-            <div id="chat-output" class="chat-output">
-                @if (VM.ChatMessages.Count == 0)
+                <textarea id="promptInput"
+                          @bind="VM.UserInput"
+                          @bind:event="oninput"
+                          rows="4"
+                          placeholder="Enter your prompt..."
+                          class="prompt-textarea"
+                          disabled="@(!VM.IsLoaded || VM.IsBusy)"></textarea>
+
+                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap">
+                    <RadzenButton Text="Browse Images" Icon="image_search" ButtonStyle="ButtonStyle.Light" Click="VM.BrowseImagesClickAsync" Disabled="@VM.IsGenerating" />
+                    <InputFile id="imagePicker" OnChange="VM.OnImagesSelectedAsync" multiple accept="image/*,.tif,.tiff" style="display:none;" />
+
+                    <RadzenButton Text="Generate" Icon="send" ButtonStyle="ButtonStyle.Primary" Disabled="@(!VM.CanSend || !VM.IsLoaded || VM.IsBusy)" Click="@VM.StartGenerationAsync" />
+                    <RadzenButton Text="Cancel" Icon="stop" ButtonStyle="ButtonStyle.Warning" Disabled="@(!VM.IsGenerating)" Click="@VM.CancelGeneration" />
+                    <RadzenButton Text="Reset" Icon="restart_alt" ButtonStyle="ButtonStyle.Light" Disabled="@(VM.IsGenerating)" Click="@VM.ResetConversationAsync" />
+                </RadzenStack>
+
+                @if (VM.SelectedImagePaths.Count > 0)
                 {
-                    <RadzenText TextStyle="TextStyle.Caption" Text="No conversation yet. Load a model and start with a prompt or load a previous context." />
-                }
-                else
-                {
-                    @foreach (var message in VM.ChatMessages)
-                    {
-                        <div class="chat-message @message.Role">
-                            <div class="chat-role">@message.Role.ToUpperInvariant()</div>
-                            <div class="chat-content">@((MarkupString) VM.RenderChatContent(message.Content ?? string.Empty))</div>
+                    <RadzenCard Variant="Variant.Flat" class="image-files-card chat-footer-section">
+                        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" class="rz-mb-1">
+                            <RadzenText TextStyle="TextStyle.Subtitle2" Text="@($"Image Attachments ({VM.SelectedImagePaths.Count})")" />
+                            <div style="flex:1"></div>
+                            <RadzenButton Icon="@(VM.ImageAttachmentsExpanded ? "remove" : "add")" Size="ButtonSize.Small" class="collapse-btn" Click="VM.ToggleImageAttachments" />
+                        </RadzenStack>
+
+                        <div class="collapsible @(VM.ImageAttachmentsExpanded ? "expanded" : "collapsed")">
+                            <div class="image-chip-wrap collapsible-inner">
+                                @foreach (var image in VM.SelectedImagePaths.ToList())
+                                {
+                                    var img = image;
+                                    <span class="image-chip">
+                                        <span class="image-chip-label">@VM.GetImageDisplayLabel(img)</span>
+                                        <button type="button" class="image-chip-remove" @onclick="() => VM.RemoveImagePath(img)">✕</button>
+                                    </span>
+                                }
+                            </div>
                         </div>
-                    }
+                    </RadzenCard>
                 }
             </div>
-        </RadzenStack>
-    </RadzenCard>
-</RadzenStack>
+</div>
 
 @code {
     private DotNetObjectReference<HomeViewModel>? _vmRef;

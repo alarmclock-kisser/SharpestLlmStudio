@@ -1,31 +1,72 @@
-.home-shell {
-    max-width: 1400px;
+/* ── Page wrapper: fills viewport, flex column ── */
+.page-wrapper {
     display: flex;
     flex-direction: column;
     height: calc(100vh - 120px);
-    max-height: calc(100vh - 120px);
-    min-height: 0;
     overflow: hidden;
 }
 
-.home-shell > .rz-card:not(.chat-card) {
+.top-panels-container {
     flex: 0 0 auto;
-}
-
-.chat-card {
-    flex: 1 1 auto;
-    min-height: 0;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    min-height: 140px;
 }
 
-.chat-card-stack {
+.top-panels-content {
+    min-height: 140px;
+    height: 340px;
+    max-height: 60vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-bottom: 0.25rem;
+}
+
+.top-panels-resize-handle {
+    height: 12px;
+    border-top: 1px solid var(--rz-base-300);
+    border-bottom: 1px solid var(--rz-base-300);
+    cursor: ns-resize;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--rz-text-tertiary-color);
+    user-select: none;
+}
+
+.top-panels-resize-handle:hover {
+    color: var(--rz-primary);
+    background: rgba(0, 0, 0, 0.04);
+}
+
+/* ── Scrollable content: everything ABOVE the footer scrolls here ── */
+.page-content {
     flex: 1 1 auto;
     min-height: 0;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-bottom: 0.5rem;
+}
+
+.home-shell {
+    max-width: 1400px;
+    width: 100%;
+    margin: 0 auto;
+}
+
+/* ── Footer: ALWAYS at the bottom, never scrolls away ── */
+.chat-footer {
+    flex: 0 0 auto;
+    padding: 0.5rem;
+    border-top: 2px solid var(--rz-base-300);
+    background: var(--rz-base-background-color, #fff);
+    box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.06);
+    max-height: 55vh;
+    overflow-y: auto;
+}
+
+.chat-footer-section {
+    border: 1px solid var(--rz-base-300);
 }
 
 .collapsed-model-name {
@@ -37,6 +78,13 @@
     opacity: 0.85;
     text-align: center;
     margin: 0 0.5rem;
+}
+
+.generation-stats-in-footer {
+    white-space: nowrap;
+    max-width: 58vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .image-files-card {
@@ -64,18 +112,6 @@
 
 .collapsible-inner {
     padding-top: 0.2rem;
-}
-
-.chat-output {
-    border: 1px solid var(--rz-base-300);
-    border-radius: 8px;
-    padding: 0.75rem;
-    min-height: 0;
-    height: auto;
-    max-height: none;
-    flex: 1 1 auto;
-    overflow: auto;
-    background: rgba(0, 0, 0, 0.05);
 }
 
 .chat-message {
@@ -250,9 +286,6 @@
     font-weight: 700;
 }
 
-.file-actions {
-}
-
 .delete-knowledge {
     background: transparent;
     border: none;
@@ -329,6 +362,27 @@
 .gen-settings-card {
     border: 1px solid var(--rz-base-300);
     padding: 0.4rem 0.55rem;
+    margin-bottom: 0.5rem;
+}
+
+.settings-group-title {
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--rz-text-secondary-color);
+    margin-top: 0.1rem;
+}
+
+.settings-option-row {
+    padding: 0.15rem 0 0.35rem;
+}
+
+.settings-toggle-item {
+    min-width: 170px;
+    padding: 0.15rem 0.35rem;
+    border: 1px solid var(--rz-base-300);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.015);
 }
 
 /* Limit model dropdown popup height */

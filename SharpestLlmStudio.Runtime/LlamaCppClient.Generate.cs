@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Linq;
+using System.Threading.Channels;
 using SharpestLlmStudio.Shared;
 
 namespace SharpestLlmStudio.Runtime
@@ -92,137 +93,144 @@ namespace SharpestLlmStudio.Runtime
                 };
             }
 
-            var outputChunks = new List<string>();
-            bool completed = false;
+            var streamChannel = Channel.CreateUnbounded<string>();
 
-            try
+            _ = Task.Run(async () =>
             {
-                while (retryCount <= maxRetries)
-                {
-                    var payload = this.BuildChatCompletionPayload(request, normalizedImages);
-                    outputChunks.Clear();
-                    completed = false;
+                bool completed = false;
+                bool emittedChunks = false;
 
-                    try
+                try
+                {
+                    while (retryCount <= maxRetries)
                     {
-                        if (request.Stream)
+                        var payload = this.BuildChatCompletionPayload(request, normalizedImages);
+                        completed = false;
+
+                        try
                         {
-                            await foreach (var chunk in this.StreamChatCompletionChunksAsync(payload, cancellationToken))
+                            if (request.Stream)
                             {
+                                await foreach (var chunk in this.StreamChatCompletionChunksAsync(payload, cancellationToken))
+                                {
+                                    this.TouchServerActivity();
+                                    assistantText += chunk;
+                                    emittedChunks = true;
+                                    await streamChannel.Writer.WriteAsync(chunk, cancellationToken);
+
+                                    lock (this._generationStatsLock)
+                                    {
+                                        if (this.LastGenerationStats.TimeTilFirstToken <= 0.0 && this.LastGenerationStats.GenerationStarted.HasValue)
+                                        {
+                                            this.LastGenerationStats.TimeTilFirstToken = Math.Max(0.0, (DateTime.UtcNow - this.LastGenerationStats.GenerationStarted.Value).TotalSeconds);
+                                        }
+
+                                        this.LastGenerationStats.TotalTokensGenerated = CountRoughTokens(assistantText);
+                                        this.LastGenerationStats.TotalContextTokens = CountRoughTokens(payload["messages"]?.ToJsonString() ?? "") + CountRoughTokens(assistantText);
+                                        this.LastGenerationStats.GenerationFinished = null;
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                assistantText = await this.GenerateSingleChatCompletionAsync(payload, cancellationToken);
                                 this.TouchServerActivity();
-                                assistantText += chunk;
-                                outputChunks.Add(chunk);
 
                                 lock (this._generationStatsLock)
                                 {
-                                    if (this.LastGenerationStats.TimeTilFirstToken <= 0.0 && this.LastGenerationStats.GenerationStarted.HasValue)
+                                    if (this.LastGenerationStats.TimeTilFirstToken <= 0.0)
                                     {
-                                        this.LastGenerationStats.TimeTilFirstToken = Math.Max(0.0, (DateTime.UtcNow - this.LastGenerationStats.GenerationStarted.Value).TotalSeconds);
+                                        this.LastGenerationStats.TimeTilFirstToken = 0.0;
                                     }
 
                                     this.LastGenerationStats.TotalTokensGenerated = CountRoughTokens(assistantText);
                                     this.LastGenerationStats.TotalContextTokens = CountRoughTokens(payload["messages"]?.ToJsonString() ?? "") + CountRoughTokens(assistantText);
-                                    this.LastGenerationStats.GenerationFinished = null;
                                 }
-                            }
-                        }
-                        else
-                        {
-                            assistantText = await this.GenerateSingleChatCompletionAsync(payload, cancellationToken);
-                            this.TouchServerActivity();
 
-                            lock (this._generationStatsLock)
-                            {
-                                if (this.LastGenerationStats.TimeTilFirstToken <= 0.0)
+                                if (!string.IsNullOrEmpty(assistantText))
                                 {
-                                    this.LastGenerationStats.TimeTilFirstToken = 0.0;
+                                    emittedChunks = true;
+                                    await streamChannel.Writer.WriteAsync(assistantText, cancellationToken);
                                 }
-
-                                this.LastGenerationStats.TotalTokensGenerated = CountRoughTokens(assistantText);
-                                this.LastGenerationStats.TotalContextTokens = CountRoughTokens(payload["messages"]?.ToJsonString() ?? "") + CountRoughTokens(assistantText);
                             }
 
-                            if (!string.IsNullOrEmpty(assistantText))
+                            completed = true;
+                        }
+                        catch (HttpRequestException ex) when (ex.Message.Contains("400") && ex.Message.Contains("context", StringComparison.OrdinalIgnoreCase) && retryCount < maxRetries && !emittedChunks)
+                        {
+                            retryCount++;
+                            await StaticLogger.LogAsync($"[LlamaCpp] Context overflow on attempt {retryCount}, trimming oldest messages and retrying...");
+
+                            lock (this._conversationLock)
                             {
-                                outputChunks.Add(assistantText);
+                                int removed = 0;
+                                while (removed < 2 && this.ConversationMessages.Count > 0)
+                                {
+                                    this.ConversationMessages.RemoveAt(0);
+                                    removed++;
+                                }
                             }
+
+                            if (this.ConversationMessages.Count == 0)
+                            {
+                                throw;
+                            }
+
+                            assistantText = string.Empty;
+                            continue;
+                        }
+                        catch (System.IO.IOException ioEx)
+                        {
+                            bool serverDead = this._serverProcess != null && this._serverProcess.HasExited;
+                            string detail = serverDead
+                                ? $"llama-server process has exited (exit code {this._serverProcess!.ExitCode}). The model may have run out of memory."
+                                : "llama-server closed the connection unexpectedly.";
+                            await StaticLogger.LogAsync($"[LlamaCpp] IOException during generation: {ioEx.Message} — {detail}");
+                            throw new InvalidOperationException($"{detail} ({ioEx.Message})", ioEx);
+                        }
+                        catch (HttpRequestException httpEx) when (httpEx.InnerException is System.IO.IOException)
+                        {
+                            bool serverDead = this._serverProcess != null && this._serverProcess.HasExited;
+                            string detail = serverDead
+                                ? $"llama-server process has exited (exit code {this._serverProcess!.ExitCode}). The model may have run out of memory."
+                                : "llama-server closed the connection unexpectedly.";
+                            await StaticLogger.LogAsync($"[LlamaCpp] Connection lost during generation: {httpEx.Message} — {detail}");
+                            throw new InvalidOperationException($"{detail} ({httpEx.Message})", httpEx);
                         }
 
-                        completed = true;
+                        if (completed)
+                        {
+                            break;
+                        }
                     }
-                    catch (HttpRequestException ex) when (ex.Message.Contains("400") && ex.Message.Contains("context", StringComparison.OrdinalIgnoreCase) && retryCount < maxRetries)
-                    {
-                        // Context overflow — trim oldest conversation messages (ring buffer) and retry
-                        retryCount++;
-                        await StaticLogger.LogAsync($"[LlamaCpp] Context overflow on attempt {retryCount}, trimming oldest messages and retrying...");
 
+                    if (!request.Isolated && request.PersistConversation)
+                    {
                         lock (this._conversationLock)
                         {
-                            // Remove the 2 oldest non-system messages (1 user + 1 assistant pair)
-                            int removed = 0;
-                            while (removed < 2 && this.ConversationMessages.Count > 0)
-                            {
-                                this.ConversationMessages.RemoveAt(0);
-                                removed++;
-                            }
+                            this.ConversationMessages.Add(new LlamaChatMessage { Role = "user", Content = request.Prompt });
+                            this.ConversationMessages.Add(new LlamaChatMessage { Role = "assistant", Content = assistantText });
                         }
-
-                        if (this.ConversationMessages.Count == 0)
-                        {
-                            // No more history to trim — re-throw
-                            throw;
-                        }
-
-                        assistantText = string.Empty;
-                        continue;
-                    }
-                    catch (System.IO.IOException ioEx)
-                    {
-                        // Server closed the connection (likely crashed, e.g. OOM or internal error)
-                        bool serverDead = this._serverProcess != null && this._serverProcess.HasExited;
-                        string detail = serverDead
-                            ? $"llama-server process has exited (exit code {this._serverProcess!.ExitCode}). The model may have run out of memory."
-                            : "llama-server closed the connection unexpectedly.";
-                        await StaticLogger.LogAsync($"[LlamaCpp] IOException during generation: {ioEx.Message} — {detail}");
-                        throw new InvalidOperationException($"{detail} ({ioEx.Message})", ioEx);
-                    }
-                    catch (HttpRequestException httpEx) when (httpEx.InnerException is System.IO.IOException)
-                    {
-                        bool serverDead = this._serverProcess != null && this._serverProcess.HasExited;
-                        string detail = serverDead
-                            ? $"llama-server process has exited (exit code {this._serverProcess!.ExitCode}). The model may have run out of memory."
-                            : "llama-server closed the connection unexpectedly.";
-                        await StaticLogger.LogAsync($"[LlamaCpp] Connection lost during generation: {httpEx.Message} — {detail}");
-                        throw new InvalidOperationException($"{detail} ({httpEx.Message})", httpEx);
                     }
 
-                    if (completed)
-                    {
-                        break;
-                    }
+                    streamChannel.Writer.TryComplete();
                 }
-            }
-            finally
-            {
-                // Always finalize generation stats so the timer stops, even on exceptions
-                lock (this._generationStatsLock)
+                catch (Exception ex)
                 {
-                    this.LastGenerationStats.GenerationFinished = DateTime.UtcNow;
+                    streamChannel.Writer.TryComplete(ex);
                 }
-            }
+                finally
+                {
+                    lock (this._generationStatsLock)
+                    {
+                        this.LastGenerationStats.GenerationFinished = DateTime.UtcNow;
+                    }
+                }
+            }, cancellationToken);
 
-            foreach (var chunk in outputChunks)
+            await foreach (var chunk in streamChannel.Reader.ReadAllAsync(cancellationToken))
             {
                 yield return chunk;
-            }
-
-            if (!request.Isolated && request.PersistConversation)
-            {
-                lock (this._conversationLock)
-                {
-                    this.ConversationMessages.Add(new LlamaChatMessage { Role = "user", Content = request.Prompt });
-                    this.ConversationMessages.Add(new LlamaChatMessage { Role = "assistant", Content = assistantText });
-                }
             }
         }
 
@@ -271,7 +279,40 @@ namespace SharpestLlmStudio.Runtime
 
                     trimmed.Reverse();
 
-                    foreach (var message in trimmed)
+                    // Ensure strict user/assistant alternation required by chat templates (e.g. Gemma).
+                    // After trimming, the first message may be "assistant" — drop leading non-user messages,
+                    // then merge any consecutive same-role messages so the sequence always alternates.
+                    while (trimmed.Count > 0 && !string.Equals(trimmed[0].Role, "user", StringComparison.OrdinalIgnoreCase))
+                    {
+                        trimmed.RemoveAt(0);
+                    }
+
+                    var sanitized = new List<LlamaChatMessage>();
+                    foreach (var msg in trimmed)
+                    {
+                        if (sanitized.Count > 0 && string.Equals(sanitized[^1].Role, msg.Role, StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Merge consecutive same-role messages
+                            sanitized[^1] = new LlamaChatMessage
+                            {
+                                Role = sanitized[^1].Role,
+                                Content = sanitized[^1].Content + "\n" + msg.Content,
+                                CreatedAtUtc = sanitized[^1].CreatedAtUtc
+                            };
+                        }
+                        else
+                        {
+                            sanitized.Add(msg);
+                        }
+                    }
+
+                    // If the last history message is "user", drop it — we'll add the current user prompt next
+                    if (sanitized.Count > 0 && string.Equals(sanitized[^1].Role, "user", StringComparison.OrdinalIgnoreCase))
+                    {
+                        sanitized.RemoveAt(sanitized.Count - 1);
+                    }
+
+                    foreach (var message in sanitized)
                     {
                         messages.Add(new JsonObject
                         {
@@ -539,6 +580,7 @@ namespace SharpestLlmStudio.Runtime
             return result;
         }
 
+        [SupportedOSPlatform("windows")]
         private static void TryEstimateTokensForBase64(string base64, string key)
         {
             try

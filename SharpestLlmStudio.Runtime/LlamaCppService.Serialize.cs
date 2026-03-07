@@ -71,7 +71,7 @@ namespace SharpestLlmStudio.Runtime
                         {
                             try
                             {
-                                var dimension = new FrameDimension(image.FrameDimensionsList[0]);
+                                var dimension = new FrameDimension(image.FrameDimensionsList![0]!);
                                 image.SelectActiveFrame(dimension, f);
 
                                 // Estimate tokens for this frame based on the post-downsize dimensions (if downsize is configured).

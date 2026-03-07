@@ -16,6 +16,21 @@
     position: relative;
     height: 100%;
     overflow: hidden;
+    padding-bottom: 3rem;
+}
+
+.sidebar-theme-toggle {
+    position: absolute;
+    left: 0.4rem;
+    right: 0.9rem;
+    bottom: 0.35rem;
+    display: flex;
+    justify-content: flex-start;
+    z-index: 2;
+}
+
+.sidebar-theme-toggle ::deep .rz-button {
+    width: 100%;
 }
 
 .sidebar-resize-handle {

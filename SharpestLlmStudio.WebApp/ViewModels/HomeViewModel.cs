@@ -294,7 +294,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public bool IsGenerating { get; set; } = false;
 
         public bool CanSend => !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput);
-        public string SystemPrompt { get; set; } = "You are a helpful, concise assistant.";
+        public string SystemPrompt { get; set; } = string.Empty;
 
         public List<LlamaChatMessage> ChatMessages { get; private set; } = [];
         // Sum of estimated tokens for uploaded images (updated on upload)
@@ -310,7 +310,20 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public IReadOnlyList<LlamaKnowledgeSearchResult> KnowledgeResults { get; private set; } = [];
         public IReadOnlyList<LlamaKnowledgeEntry> KnowledgeEntries { get; private set; } = [];
 
-        public string? LastActionMessage { get; set; } = null;
+        private readonly object lastActionMessageSync = new();
+        private CancellationTokenSource? lastActionMessageCts;
+        private string? lastActionMessage;
+        public string? LastActionMessage
+        {
+            get => this.lastActionMessage;
+            set
+            {
+                this.lastActionMessage = value;
+                this.LastActionIsAllowedNonAdminCommand = false;
+                this.ScheduleLastActionMessageAutoDismiss(value);
+            }
+        }
+        public bool LastActionIsAllowedNonAdminCommand { get; private set; }
         public bool MonitoringEnabled => this.Settings.EnableMonitoring;
         public bool HasSavedContextBaseline => !string.IsNullOrWhiteSpace(this.SelectedContextFilePath);
         public bool IsVolatileContext => !this.HasSavedContextBaseline;
@@ -379,6 +392,9 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public const string KnowledgeExpandedStorageKey = "home.knowledge.expanded";
         public const string GenSettingsExpandedStorageKey = "home.gensettings.expanded";
         public const string ChatOutputElementId = "chat-output";
+        public const string ChatFooterElementId = "chat-footer";
+        public const string TopPanelsContentElementId = "top-panels-content";
+        public const string TopPanelsResizeHandleElementId = "top-panels-resize-handle";
 
         // UI state tracking (moved from Razor @code)
         private bool? _lastLoadedState;
@@ -386,6 +402,19 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         private bool _panelStateLoaded;
         public bool ImageAttachmentsExpanded { get; set; } = true;
         public bool GenSettingsExpanded { get; set; } = false;
+        public bool AutoScrollEnabled { get; set; } = true;
+        public bool EnableCommandAgentMode { get; set; } = true;
+        public bool EnableWebSearchAgentMode { get; set; } = true;
+        public bool AutoContinueAgentActions { get; set; } = false;
+        public bool AllowAllNonAdminCommands { get; set; } = false;
+        public bool AgentShowCommandWindow { get; set; }
+
+        public LlamaCommandRequest? PendingCommandRequest { get; private set; }
+        public LlamaWebSearchRequest? PendingWebSearchRequest { get; private set; }
+        public LlamaCommandSafetyAssessment? PendingCommandSafety { get; private set; }
+
+        public bool HasPendingCommandRequest => this.PendingCommandRequest != null;
+        public bool HasPendingWebSearchRequest => this.PendingWebSearchRequest != null;
 
         // Computed properties (moved from Razor @code)
         public LlamaModelInfo? SelectedModelInfo => this.LlamaModels.FirstOrDefault(m => m.Name == this.SelectedModelName);
@@ -398,7 +427,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 ? "Load multimodal projection (mmproj)"
                 : "Multimodal projection \u2013 not available for this model";
 
-        public string GenerationStatsSummary
+        public string GenerationStatsContingent
         {
             get
             {
@@ -410,7 +439,23 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
                 string total = stats.TotalGenerationTime.HasValue ? $"{stats.TotalGenerationTime.Value.TotalSeconds:F1}s" : "-";
                 string ttft = stats.TimeTilFirstToken > 0 ? $"{stats.TimeTilFirstToken:F3}s" : "-";
-                return $"(tok: {stats.TotalTokensGenerated} | tok/s: {stats.TokensPerSecond:F3} | TTFT: {ttft} | total: {total}) [{stats.TotalContextTokens} of {stats.ContextSize} tokens used]";
+                return $"[{stats.TotalContextTokens} of {stats.ContextSize} tokens used]";
+            }
+        }
+
+        public string GenerationStatsLast
+        {
+            get
+            {
+                var stats = this.LastGenerationStats;
+                if (stats == null)
+                {
+                    return "";
+                }
+
+                string total = stats.TotalGenerationTime.HasValue ? $"{stats.TotalGenerationTime.Value.TotalSeconds:F1}s" : "-";
+                string ttft = stats.TimeTilFirstToken > 0 ? $"{stats.TimeTilFirstToken:F3}s" : "-";
+                return $"(tok: {stats.TotalTokensGenerated} | tok/s: {stats.TokensPerSecond:F3} | TTFT: {ttft} | total: {total})";
             }
         }
 
@@ -423,6 +468,10 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.Client = ApiClient;
             this.Js = js;
             this.Settings = webAppSettings;
+            this.AgentShowCommandWindow = this.Settings.AgentShowCommandWindow;
+            this.AutoContinueAgentActions = this.Settings.AgentAutoContinue;
+            this.AllowAllNonAdminCommands = this.Settings.AllowAllNonAdminCommands;
+            this.SystemPrompt = this.BuildDefaultSystemPromptFromSettings();
             // Initialize image preferences from settings defaults
             this.ImageMaxDimension = Math.Max(0, this.Settings.DefaultImageMaxDimension);
             this.ImageFormat = string.IsNullOrWhiteSpace(this.Settings.DefaultImageFormat) ? "jpg" : NormalizeImageFormat(this.Settings.DefaultImageFormat);
@@ -500,6 +549,91 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             await this.StartGenerationAsync();
         }
 
+        [JSInvokable]
+        [SupportedOSPlatform("windows")]
+        public async Task OnClipboardImagePasted(string dataUrl, string contentType)
+        {
+            if (string.IsNullOrWhiteSpace(dataUrl) || !dataUrl.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            try
+            {
+                int commaIndex = dataUrl.IndexOf(',');
+                if (commaIndex < 0 || commaIndex >= dataUrl.Length - 1)
+                {
+                    return;
+                }
+
+                string base64 = dataUrl[(commaIndex + 1)..];
+                byte[] bytes = Convert.FromBase64String(base64);
+
+                string extension = contentType?.ToLowerInvariant() switch
+                {
+                    "image/png" => ".png",
+                    "image/bmp" => ".bmp",
+                    "image/tiff" => ".tiff",
+                    "image/tif" => ".tif",
+                    _ => ".jpg"
+                };
+
+                string tempDir = Path.Combine(Path.GetTempPath(), "SharpestLlmStudio", "clipboard");
+                Directory.CreateDirectory(tempDir);
+                string fileName = $"clip_{DateTime.UtcNow:yyyyMMdd_HHmmss_fff}_{Guid.NewGuid():N}{extension}";
+                string tempPath = Path.Combine(tempDir, fileName);
+                await File.WriteAllBytesAsync(tempPath, bytes);
+
+                int width = 0;
+                int height = 0;
+                try
+                {
+                    var dimensions = await this.Js.InvokeAsync<int[]>("sharpestNavMenu.getImageDimensionsFromDataUrl", dataUrl);
+                    if (dimensions is { Length: >= 2 })
+                    {
+                        width = Math.Max(0, dimensions[0]);
+                        height = Math.Max(0, dimensions[1]);
+                    }
+                }
+                catch
+                {
+                }
+
+                if (!this.SelectedImagePaths.Contains(tempPath, StringComparer.OrdinalIgnoreCase))
+                {
+                    this.SelectedImagePaths.Add(tempPath);
+                    this.loadedImageMetadata[tempPath] = new LoadedImageMetadata
+                    {
+                        FileName = fileName,
+                        Width = width,
+                        Height = height,
+                        FileSizeBytes = bytes.Length
+                    };
+
+                    try
+                    {
+                        int estimatedTokens = EstimateImageTokens(width, height, this.AsBytes, this.ImageFormat, this.BitDepthEnabled ? this.BitDepth : null);
+                        this.ImageEstimatedTokensTotal += estimatedTokens;
+                        int convTokens = CountRoughTokens(string.Join(" ", this.Client.GetConversationSnapshot().Select(m => m.Content)));
+                        int totalEstimated = Math.Min(this.ContextSize, convTokens + this.ImageEstimatedTokensTotal);
+                        await StaticLogger.LogAsync($"[HomeViewModel] Clipboard image '{fileName}' estimated ~{estimatedTokens} tokens (width={width},height={height},format={this.ImageFormat},bytes={bytes.Length})");
+                        await StaticLogger.LogAsync($"[HomeViewModel] Estimated context usage after clipboard paste: {totalEstimated} / {this.ContextSize} tokens (conversation {convTokens} + images {this.ImageEstimatedTokensTotal})");
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                this.IsImagePathsExpanded = this.SelectedImagePaths.Count > 0;
+                this.LastActionMessage = $"Clipboard image attached: {fileName}";
+                this.RequestUiRefresh();
+            }
+            catch (Exception ex)
+            {
+                await StaticLogger.LogAsync(ex, "[HomeViewModel] Failed to process clipboard image");
+            }
+        }
+
 
         public Task InitializeAsync()
         {
@@ -524,6 +658,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                         this.IsLoaded = true;
                         this.LoadedModel = this.ResolveModelFromServerId(attachResult.ActiveModelId) ?? this.LlamaModels.FirstOrDefault(m => m.Name.Equals(this.SelectedModelName, StringComparison.OrdinalIgnoreCase));
                         this.IsReusedInstance = true;
+                        this.IsModelPanelExpanded = true;
                         if (this.LoadedModel != null)
                         {
                             this.SelectedModelName = this.LoadedModel.Name;
@@ -531,6 +666,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
                         this.ModelLoadingTimeString = "Attached to existing llama-server instance.";
                         this.LastActionMessage = "Existing llama-server instance detected and reused.";
+                        this.ScheduleModelPanelAutoCollapse();
                     }
                 }
                 catch
@@ -932,6 +1068,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     this.LastActionMessage = "Generation finished.";
                 }
 
+                this.DetectPendingAgentActions(assistantText);
+
                 // Sync UI chat messages from client — ring buffer may have trimmed oldest messages
                 // Keep isolated output visible in UI; do not overwrite it from persistent history.
                 if (!this.IsolatedGeneration)
@@ -963,6 +1101,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             finally
             {
                 this.IsGenerating = false;
+                await this.TryAutoExecuteAllowedNonAdminCommandAsync();
                 this.RequestUiRefresh();
             }
         }
@@ -1506,6 +1645,82 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             try { this.NotifyStateChanged?.Invoke(); } catch { }
         }
 
+        private void ScheduleModelPanelAutoCollapse()
+        {
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(5000);
+                if (this.IsLoaded)
+                {
+                    this.IsModelPanelExpanded = false;
+                    this.RequestUiRefresh();
+                }
+            });
+        }
+
+        private void ScheduleLastActionMessageAutoDismiss(string? message)
+        {
+            CancellationTokenSource? ctsToCancel;
+            CancellationTokenSource? newCts = null;
+
+            lock (this.lastActionMessageSync)
+            {
+                ctsToCancel = this.lastActionMessageCts;
+                this.lastActionMessageCts = null;
+
+                if (!string.IsNullOrWhiteSpace(message))
+                {
+                    newCts = new CancellationTokenSource();
+                    this.lastActionMessageCts = newCts;
+                }
+            }
+
+            try
+            {
+                ctsToCancel?.Cancel();
+                ctsToCancel?.Dispose();
+            }
+            catch
+            {
+            }
+
+            if (newCts == null)
+            {
+                return;
+            }
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(5), newCts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+
+                bool shouldClear;
+                lock (this.lastActionMessageSync)
+                {
+                    shouldClear = ReferenceEquals(this.lastActionMessageCts, newCts)
+                        && string.Equals(this.lastActionMessage, message, StringComparison.Ordinal);
+                    if (shouldClear)
+                    {
+                        this.lastActionMessage = null;
+                        this.lastActionMessageCts = null;
+                    }
+                }
+
+                if (shouldClear)
+                {
+                    this.RequestUiRefresh();
+                }
+
+                newCts.Dispose();
+            });
+        }
+
         // ── Lifecycle methods (called from Razor OnAfterRenderAsync) ──
 
         public async Task OnFirstRenderAsync(DotNetObjectReference<HomeViewModel> vmRef)
@@ -1516,8 +1731,12 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this._lastLoadedState = this.IsLoaded;
 
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupPromptEnter", "promptInput", vmRef);
-            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupConditionalAutoScroll", ChatOutputElementId, 0.1);
-            await this.Js.InvokeVoidAsync("sharpestNavMenu.autoScrollIfSticky", ChatOutputElementId);
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupClipboardImagePaste", "promptInput", vmRef);
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupVerticalResizeHandle", TopPanelsResizeHandleElementId, TopPanelsContentElementId, 140, 900);
+            if (this.AutoScrollEnabled)
+            {
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.scrollToBottom", ChatOutputElementId);
+            }
             this._lastChatMessageCount = this.ChatMessages.Count;
         }
 
@@ -1534,10 +1753,10 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 await this.PersistPanelStatesAsync();
             }
 
-            if (this.ChatMessages.Count != this._lastChatMessageCount || this.IsGenerating)
+            if (this.AutoScrollEnabled && (this.ChatMessages.Count != this._lastChatMessageCount || this.IsGenerating))
             {
                 this._lastChatMessageCount = this.ChatMessages.Count;
-                await this.Js.InvokeVoidAsync("sharpestNavMenu.autoScrollIfSticky", ChatOutputElementId);
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.scrollToBottom", ChatOutputElementId);
             }
         }
 
@@ -1621,6 +1840,196 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             return StaticLogics.RenderMarkdownOrJson(displayContent);
         }
 
+        private void DetectPendingAgentActions(string assistantText)
+        {
+            if (string.IsNullOrWhiteSpace(assistantText))
+            {
+                return;
+            }
+
+            if (this.EnableCommandAgentMode && this.PendingCommandRequest == null
+                && this.Client.TryExtractCommandRequest(assistantText, out var cmdRequest)
+                && cmdRequest != null)
+            {
+                this.PendingCommandRequest = cmdRequest;
+                this.PendingCommandSafety = this.Client.EvaluateCommandSafety(cmdRequest.Command);
+                string safety = this.PendingCommandSafety.SafetyLevel;
+                this.LastActionMessage = $"Agent-Aktion erkannt: CMD '{safety}' wartet auf Bestätigung.";
+            }
+
+            if (this.EnableWebSearchAgentMode && this.PendingWebSearchRequest == null
+                && this.Client.TryExtractWebSearchRequest(assistantText, out var webRequest)
+                && webRequest != null)
+            {
+                this.PendingWebSearchRequest = webRequest;
+                this.LastActionMessage = this.PendingCommandRequest != null
+                    ? "Agent-Aktionen erkannt: Kommando + Websuche warten auf Bestätigung."
+                    : "Agent-Aktion erkannt: Websuche wartet auf Bestätigung.";
+            }
+        }
+
+        [SupportedOSPlatform("windows")]
+        private async Task TryAutoExecuteAllowedNonAdminCommandAsync()
+        {
+            if (!this.AllowAllNonAdminCommands || this.PendingCommandRequest == null || this.IsGenerating)
+            {
+                return;
+            }
+
+            var request = this.PendingCommandRequest;
+            var safety = this.PendingCommandSafety ?? this.Client.EvaluateCommandSafety(request.Command);
+
+            if (safety.IsBlocked)
+            {
+                return;
+            }
+
+            this.PendingCommandRequest = null;
+            this.PendingCommandSafety = null;
+            request.ShowWindow = this.AgentShowCommandWindow;
+
+            this.LastActionMessage = $"Command auto-executed (allowed non-admin): {request.Command}";
+            this.LastActionIsAllowedNonAdminCommand = true;
+            this.RequestUiRefresh();
+
+            bool allowElevated = safety.RequiresAdditionalConfirmation;
+            var result = await this.Client.ExecuteCommandAsync(request, allowElevated: allowElevated, timeout: TimeSpan.FromSeconds(30));
+            string injection = this.Client.BuildCommandResultInjectionPrompt(result);
+            this.UserInput = AppendPromptForAgent(this.UserInput, injection);
+
+            this.LastActionMessage = result.Success
+                ? "Command executed automatically (allowed non-admin). Result was appended to prompt."
+                : $"Auto command failed: {result.ErrorMessage ?? "Unknown error"}";
+            this.LastActionIsAllowedNonAdminCommand = true;
+            this.RequestUiRefresh();
+
+            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
+            {
+                await this.StartGenerationAsync();
+            }
+        }
+
+        [SupportedOSPlatform("windows")]
+        public async Task ConfirmPendingCommandAsync()
+        {
+            if (this.PendingCommandRequest == null || this.IsGenerating)
+            {
+                return;
+            }
+
+            var request = this.PendingCommandRequest;
+            this.PendingCommandRequest = null;
+            var safety = this.PendingCommandSafety ?? this.Client.EvaluateCommandSafety(request.Command);
+            this.PendingCommandSafety = null;
+
+            if (safety.IsBlocked)
+            {
+                this.LastActionMessage = $"Command blockiert: {safety.Reason}";
+                this.RequestUiRefresh();
+                return;
+            }
+
+            bool allowElevated = false;
+            if (safety.RequiresAdditionalConfirmation)
+            {
+                bool confirmed = await this.Js.InvokeAsync<bool>(
+                    "confirm",
+                    $"Stärkerer Command erkannt ({safety.SafetyLevel}).\n\nCommand:\n{request.Command}\n\nGrund:\n{safety.Reason}\n\nWirklich ausführen?");
+
+                if (!confirmed)
+                {
+                    this.LastActionMessage = "Stärkerer Command wurde vom Benutzer abgelehnt.";
+                    this.RequestUiRefresh();
+                    return;
+                }
+
+                allowElevated = true;
+            }
+
+            request.ShowWindow = this.AgentShowCommandWindow;
+            this.LastActionMessage = $"Führe Command aus ({safety.SafetyLevel}): {request.Command}";
+            this.RequestUiRefresh();
+
+            var result = await this.Client.ExecuteCommandAsync(request, allowElevated, TimeSpan.FromSeconds(30));
+            string injection = this.Client.BuildCommandResultInjectionPrompt(result);
+            this.UserInput = AppendPromptForAgent(this.UserInput, injection);
+            this.LastActionMessage = result.Success
+                ? "Command ausgeführt. Ergebnis wurde an den Prompt angehängt."
+                : $"Command fehlgeschlagen/geblockt: {result.ErrorMessage ?? "Unbekannter Fehler"}";
+
+            this.RequestUiRefresh();
+
+            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
+            {
+                await this.StartGenerationAsync();
+            }
+        }
+
+        public void RejectPendingCommand()
+        {
+            if (this.PendingCommandRequest == null)
+            {
+                return;
+            }
+
+            this.PendingCommandRequest = null;
+            this.PendingCommandSafety = null;
+            this.LastActionMessage = "Command-Ausführung wurde verworfen.";
+            this.RequestUiRefresh();
+        }
+
+        [SupportedOSPlatform("windows")]
+        public async Task ConfirmPendingWebSearchAsync()
+        {
+            if (this.PendingWebSearchRequest == null || this.IsGenerating)
+            {
+                return;
+            }
+
+            var request = this.PendingWebSearchRequest;
+            this.PendingWebSearchRequest = null;
+            this.LastActionMessage = request.IsDirectUrl
+                ? $"Lade URL: {request.Url}"
+                : $"Starte Websuche: {request.Query}";
+            this.RequestUiRefresh();
+
+            var result = await this.Client.ExecuteWebSearchAsync(request);
+            string injection = this.Client.BuildWebSearchResultInjectionPrompt(result);
+            this.UserInput = AppendPromptForAgent(this.UserInput, injection);
+            this.LastActionMessage = result.Success
+                ? "Webergebnis geholt. Ergebnis wurde an den Prompt angehängt."
+                : $"Websuche fehlgeschlagen: {result.ErrorMessage ?? "Unbekannter Fehler"}";
+
+            this.RequestUiRefresh();
+
+            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
+            {
+                await this.StartGenerationAsync();
+            }
+        }
+
+        public void RejectPendingWebSearch()
+        {
+            if (this.PendingWebSearchRequest == null)
+            {
+                return;
+            }
+
+            this.PendingWebSearchRequest = null;
+            this.LastActionMessage = "Websuche wurde verworfen.";
+            this.RequestUiRefresh();
+        }
+
+        private static string AppendPromptForAgent(string existingPrompt, string injection)
+        {
+            if (string.IsNullOrWhiteSpace(existingPrompt))
+            {
+                return injection.Trim();
+            }
+
+            return existingPrompt.TrimEnd() + "\n\n" + injection.Trim();
+        }
+
         // ── Panel state persistence ──
 
         private async Task LoadPanelStatesAsync()
@@ -1647,6 +2056,22 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         public void Dispose()
         {
+            CancellationTokenSource? ctsToCancel;
+            lock (this.lastActionMessageSync)
+            {
+                ctsToCancel = this.lastActionMessageCts;
+                this.lastActionMessageCts = null;
+            }
+
+            try
+            {
+                ctsToCancel?.Cancel();
+                ctsToCancel?.Dispose();
+            }
+            catch
+            {
+            }
+
             this.autoRefreshTimer?.Dispose();
             this.autoRefreshTimer = null;
 
@@ -1755,15 +2180,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                             this.LastActionMessage = "An existing llama-server instance was already running and is now reused.";
                         }
 
-                        _ = Task.Run(async () =>
-                        {
-                            await Task.Delay(5000);
-                            if (this.IsLoaded)
-                            {
-                                this.IsModelPanelExpanded = false;
-                                this.RequestUiRefresh();
-                            }
-                        });
+                        this.ScheduleModelPanelAutoCollapse();
                     }
                     else
                     {
@@ -1816,6 +2233,14 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         {
             string? baseSystemPrompt = this.UseSystemPrompt ? this.SystemPrompt : null;
 
+            string toolInstructions = this.BuildToolInstructionPrompt();
+            if (!string.IsNullOrWhiteSpace(toolInstructions))
+            {
+                baseSystemPrompt = string.IsNullOrWhiteSpace(baseSystemPrompt)
+                    ? toolInstructions
+                    : baseSystemPrompt.Trim() + "\n\n" + toolInstructions;
+            }
+
             if (!this.UseJsonOutputFormat || !this.HasJsonOutputFormat)
             {
                 return baseSystemPrompt;
@@ -1835,6 +2260,57 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
 
             return baseSystemPrompt.Trim() + "\n\n" + strictFormatInstruction;
+        }
+
+        private string BuildDefaultSystemPromptFromSettings()
+        {
+            var configured = this.Settings.SystemPrompts?
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Select(EnsureSentenceEndsWithPunctuation)
+                .ToList() ?? [];
+
+            if (configured.Count > 0)
+            {
+                return string.Join(" ", configured);
+            }
+
+            return "You are a helpful, concise assistant.";
+        }
+
+        private string BuildToolInstructionPrompt()
+        {
+            var lines = new List<string>();
+
+            if (this.EnableCommandAgentMode)
+            {
+                lines.Add("Only emit command requests when the user explicitly asks to execute a command.");
+                lines.Add("Wrap executable command requests strictly in <cmd_start> and <cmd_end> tags.");
+                lines.Add("Do not output command tags for normal explanations or command suggestions.");
+            }
+
+            if (this.EnableWebSearchAgentMode)
+            {
+                lines.Add("Wrap web requests in <websearch> and </websearch> tags when external lookup is required.");
+            }
+
+            return lines.Count == 0 ? string.Empty : string.Join("\n", lines);
+        }
+
+        private static string EnsureSentenceEndsWithPunctuation(string text)
+        {
+            string trimmed = text.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                return string.Empty;
+            }
+
+            char last = trimmed[^1];
+            if (last is '.' or '!' or '?')
+            {
+                return trimmed;
+            }
+
+            return trimmed + ".";
         }
 
 
@@ -1877,12 +2353,12 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
         }
 
-        public string GetCpuSparklineSvg(int width = 180, int height = 56)
+        public string GetCpuSparklineSvg(int width = 180, int height = 32)
         {
             return StaticLogics.GetSparklineSvg(this.cpuUsageHistory, width, height, this.SparklineCpuColor, StaticLogics.GetLighterColorGradient(this.SparklineCpuColor), this.CpuManufacturerName + " CPU");
         }
 
-        public string GetGpuSparklineSvg(int width = 180, int height = 56)
+        public string GetGpuSparklineSvg(int width = 180, int height = 32)
         {
             return StaticLogics.GetSparklineSvg(this.gpuUsageHistory, width, height, this.SparklineGpuColor, StaticLogics.GetLighterColorGradient(this.SparklineGpuColor), this.GpuManufacturerName + " GPU");
         }
