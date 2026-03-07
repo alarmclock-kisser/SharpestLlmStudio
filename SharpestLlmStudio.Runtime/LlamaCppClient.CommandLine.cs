@@ -372,15 +372,16 @@ namespace SharpestLlmStudio.Runtime
             sourceSnippet = string.Empty;
 
             string normalizedOutput = NormalizeAssistantOutputForTagParsing(assistantOutput);
+            string parseableOutput = RemoveMarkedUpContentForToolTagParsing(normalizedOutput);
 
-            var tagMatch = CommandTagRegex.Match(normalizedOutput);
+            var tagMatch = CommandTagRegex.Match(parseableOutput);
             if (tagMatch.Success)
             {
                 sourceSnippet = tagMatch.Value;
                 return tagMatch.Groups["cmd"].Value;
             }
 
-            var fallbackTagMatch = CommandTagFallbackRegex.Match(normalizedOutput);
+            var fallbackTagMatch = CommandTagFallbackRegex.Match(parseableOutput);
             if (fallbackTagMatch.Success)
             {
                 sourceSnippet = fallbackTagMatch.Value;
@@ -402,6 +403,19 @@ namespace SharpestLlmStudio.Runtime
                 .Replace("\uFEFF", string.Empty, StringComparison.Ordinal)
                 .Replace("\u200B", string.Empty, StringComparison.Ordinal)
                 .Trim();
+        }
+
+        private static string RemoveMarkedUpContentForToolTagParsing(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            string withoutFencedCode = Regex.Replace(text, "```[\\s\\S]*?```", " ", RegexOptions.Multiline);
+            string withoutInlineCode = Regex.Replace(withoutFencedCode, "`[^`\\r\\n]*`", " ");
+            string withoutCodeElements = Regex.Replace(withoutInlineCode, "<code[\\s\\S]*?</code>", " ", RegexOptions.IgnoreCase);
+            return Regex.Replace(withoutCodeElements, "<pre[\\s\\S]*?</pre>", " ", RegexOptions.IgnoreCase);
         }
 
         private static string TrimForToolFeedback(string value, int maxChars)

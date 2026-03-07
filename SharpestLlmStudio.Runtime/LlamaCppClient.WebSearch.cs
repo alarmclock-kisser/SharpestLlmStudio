@@ -7,9 +7,7 @@ namespace SharpestLlmStudio.Runtime
 {
     public partial class LlamaCppClient
     {
-        private static readonly Regex WebSearchTagRegex = new("<websearch>(?<query>[\\s\\S]*?)</websearch>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        private static readonly Regex WebSearchCodeFenceRegex = new("```(?:websearch|search|http)\\s*(?<query>[\\s\\S]*?)```", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        private static readonly Regex WebSearchLineRegex = new("^(?:WEBSEARCH|SEARCH|URL)\\s*:\\s*(?<query>.+)$", RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled);
+        private static readonly Regex WebSearchTagRegex = new("<\\s*(?:websearch|websearch_start)\\s*>\\s*(?<query>[\\s\\S]*?)\\s*<\\s*/?\\s*(?:websearch|websearch_end)\\s*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         public bool TryExtractWebSearchRequest(string assistantOutput, out LlamaWebSearchRequest? request)
         {
@@ -134,28 +132,31 @@ namespace SharpestLlmStudio.Runtime
         {
             sourceSnippet = string.Empty;
 
-            var tagMatch = WebSearchTagRegex.Match(assistantOutput);
+            string normalizedOutput = NormalizeAssistantOutputForWebSearchTagParsing(assistantOutput);
+            string parseableOutput = RemoveMarkedUpContentForToolTagParsing(normalizedOutput);
+
+            var tagMatch = WebSearchTagRegex.Match(parseableOutput);
             if (tagMatch.Success)
             {
                 sourceSnippet = tagMatch.Value;
                 return tagMatch.Groups["query"].Value;
             }
 
-            var fenceMatch = WebSearchCodeFenceRegex.Match(assistantOutput);
-            if (fenceMatch.Success)
-            {
-                sourceSnippet = fenceMatch.Value;
-                return fenceMatch.Groups["query"].Value;
-            }
-
-            var lineMatch = WebSearchLineRegex.Match(assistantOutput);
-            if (lineMatch.Success)
-            {
-                sourceSnippet = lineMatch.Value;
-                return lineMatch.Groups["query"].Value;
-            }
-
             return string.Empty;
+        }
+
+        private static string NormalizeAssistantOutputForWebSearchTagParsing(string assistantOutput)
+        {
+            if (string.IsNullOrEmpty(assistantOutput))
+            {
+                return string.Empty;
+            }
+
+            string decoded = WebUtility.HtmlDecode(assistantOutput);
+            return decoded
+                .Replace("\uFEFF", string.Empty, StringComparison.Ordinal)
+                .Replace("\u200B", string.Empty, StringComparison.Ordinal)
+                .Trim();
         }
 
         private static string BuildSearchUrl(LlamaWebSearchRequest request)
