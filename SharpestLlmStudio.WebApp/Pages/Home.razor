@@ -379,6 +379,10 @@
                                     <RadzenLabel Text="Web Search" Component="enableWebSearchAgentMode" />
                                 </RadzenStack>
                                 <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem" class="settings-toggle-item">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.AutoAllowWebSearch" Name="autoAllowWebSearch" />
+                                    <RadzenLabel Text="Auto Allow WebSearch" Component="autoAllowWebSearch" />
+                                </RadzenStack>
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem" class="settings-toggle-item">
                                     <RadzenCheckBox TValue="bool" @bind-Value="VM.AutoContinueAgentActions" Name="autoContinueAgentActions" />
                                     <RadzenLabel Text="Auto Continue" Component="autoContinueAgentActions" />
                                 </RadzenStack>

@@ -203,6 +203,37 @@
     font-style: italic;
 }
 
+.chat-content ::deep a.md-link {
+    color: #1e88e5;
+    text-decoration: underline;
+    word-break: break-all;
+}
+
+.chat-content ::deep a.md-link:hover {
+    color: #1565c0;
+}
+
+.chat-content ::deep details.tool-cmd-details {
+    margin-top: 0.3rem;
+}
+
+.chat-content ::deep details.tool-cmd-details > summary {
+    cursor: pointer;
+    color: var(--rz-text-secondary-color, #666);
+    font-size: 0.82rem;
+}
+
+.chat-content ::deep pre.tool-raw {
+    background: rgba(0, 0, 0, 0.08);
+    border-radius: 6px;
+    padding: 0.5rem 0.7rem;
+    margin: 0.3rem 0;
+    font-family: Consolas, monospace;
+    font-size: 0.85rem;
+    overflow-x: auto;
+    white-space: pre;
+}
+
 .image-chip-wrap {
     display: flex;
     flex-wrap: wrap;

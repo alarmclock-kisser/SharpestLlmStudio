@@ -61,10 +61,10 @@ namespace SharpestLlmStudio.Shared
 
             if (kIdx >= 0 && uIdx >= 0)
             {
-                return content.Substring(uIdx + userPromptMarker.Length).TrimStart();
+                content = content.Substring(uIdx + userPromptMarker.Length).TrimStart();
             }
 
-            return content;
+            return SummarizeToolPayloadForDisplay(content);
         }
 
         public static string RenderMarkdown(string text)
@@ -102,6 +102,20 @@ namespace SharpestLlmStudio.Shared
                 if (inCodeBlock)
                 {
                     sb.Append(WebUtility.HtmlEncode(line)).Append('\n');
+                    continue;
+                }
+
+                if (line.StartsWith("<details class=\"tool-", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("</details>", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("<summary>", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("</summary>", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("<pre class=\"tool-", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("</pre>", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("<code>", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("</code>", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (inList) { sb.Append("</ul>"); inList = false; }
+                    sb.Append(line);
                     continue;
                 }
 
@@ -215,7 +229,73 @@ namespace SharpestLlmStudio.Shared
             encoded = Regex.Replace(encoded, @"`([^`]+)`", "<code class=\"md-inline-code\">$1</code>");
             encoded = Regex.Replace(encoded, @"\*\*(.+?)\*\*", "<strong>$1</strong>");
             encoded = Regex.Replace(encoded, @"\*(.+?)\*", "<em>$1</em>");
+            encoded = Regex.Replace(encoded, "(?<![\"'>])(https?://[^\\s<]+)", "<a class=\"md-link\" href=\"$1\" target=\"_blank\" rel=\"noopener noreferrer\">$1</a>", RegexOptions.IgnoreCase);
             return encoded;
+        }
+
+        private static string SummarizeToolPayloadForDisplay(string content)
+        {
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                return content;
+            }
+
+            string updated = Regex.Replace(
+                content,
+                @"Tool result:\s*command execution[\s\S]*?Use this tool result for the next answer\.",
+                match => BuildCommandDisplaySummary(match.Value),
+                RegexOptions.IgnoreCase);
+
+            updated = Regex.Replace(
+                updated,
+                @"Tool result:\s*web search\s*/\s*fetch[\s\S]*?Use this retrieved web content for the next answer\.",
+                match => BuildWebSearchDisplaySummary(match.Value),
+                RegexOptions.IgnoreCase);
+
+            return updated;
+        }
+
+        private static string BuildCommandDisplaySummary(string block)
+        {
+            string command = ExtractToolLineValue(block, "Command:");
+            string success = ExtractToolLineValue(block, "Success:");
+            string exitCode = ExtractToolLineValue(block, "ExitCode:");
+            string shortCommand = Truncate(command, 120);
+            string header = $"[CMD result] {shortCommand} | success={success} | exit={exitCode}";
+            string raw = WebUtility.HtmlEncode(block.Trim());
+            return header
+                + "\n<details class=\"tool-cmd-details\"><summary>Show raw CMD result</summary>"
+                + $"<pre class=\"tool-raw\"><code>{raw}</code></pre>"
+                + "</details>";
+        }
+
+        private static string BuildWebSearchDisplaySummary(string block)
+        {
+            string url = ExtractToolLineValue(block, "URL:");
+            string query = ExtractToolLineValue(block, "Query:");
+            string success = ExtractToolLineValue(block, "Success:");
+            string statusCode = ExtractToolLineValue(block, "StatusCode:");
+
+            string source = !string.IsNullOrWhiteSpace(query) ? query : url;
+            source = Truncate(source, 120);
+
+            return $"[WebSearch result: {source} | success={success} | status={statusCode}]";
+        }
+
+        private static string ExtractToolLineValue(string block, string prefix)
+        {
+            var match = Regex.Match(block, $"^{Regex.Escape(prefix)}\\s*(.+)$", RegexOptions.Multiline | RegexOptions.IgnoreCase);
+            return match.Success ? match.Groups[1].Value.Trim() : string.Empty;
+        }
+
+        private static string Truncate(string value, int maxLength)
+        {
+            if (string.IsNullOrWhiteSpace(value) || value.Length <= maxLength)
+            {
+                return value;
+            }
+
+            return value[..maxLength] + "...";
         }
 
 

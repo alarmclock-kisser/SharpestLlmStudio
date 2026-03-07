@@ -34,6 +34,7 @@ namespace SharpestLlmStudio.Shared
         public bool AgentShowCommandWindow { get; set; } = false;
         public bool AgentAutoContinue { get; set; } = true;
         public bool AllowAllNonAdminCommands { get; set; } = false;
+        public bool AutoAllowWebSearch { get; set; } = true;
 
 
 

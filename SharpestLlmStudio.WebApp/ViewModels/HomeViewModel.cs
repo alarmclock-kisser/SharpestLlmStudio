@@ -405,6 +405,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public bool AutoScrollEnabled { get; set; } = true;
         public bool EnableCommandAgentMode { get; set; } = true;
         public bool EnableWebSearchAgentMode { get; set; } = true;
+        public bool AutoAllowWebSearch { get; set; } = true;
         public bool AutoContinueAgentActions { get; set; } = false;
         public bool AllowAllNonAdminCommands { get; set; } = false;
         public bool AgentShowCommandWindow { get; set; }
@@ -471,6 +472,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.AgentShowCommandWindow = this.Settings.AgentShowCommandWindow;
             this.AutoContinueAgentActions = this.Settings.AgentAutoContinue;
             this.AllowAllNonAdminCommands = this.Settings.AllowAllNonAdminCommands;
+            this.AutoAllowWebSearch = this.Settings.AutoAllowWebSearch;
             this.SystemPrompt = this.BuildDefaultSystemPromptFromSettings();
             // Initialize image preferences from settings defaults
             this.ImageMaxDimension = Math.Max(0, this.Settings.DefaultImageMaxDimension);
@@ -1102,6 +1104,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 this.IsGenerating = false;
                 await this.TryAutoExecuteAllowedNonAdminCommandAsync();
+                await this.TryAutoExecuteWebSearchAsync();
                 this.RequestUiRefresh();
             }
         }
@@ -1901,6 +1904,37 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 ? "Command executed automatically (allowed non-admin). Result was appended to prompt."
                 : $"Auto command failed: {result.ErrorMessage ?? "Unknown error"}";
             this.LastActionIsAllowedNonAdminCommand = true;
+            this.RequestUiRefresh();
+
+            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
+            {
+                await this.StartGenerationAsync();
+            }
+        }
+
+        [SupportedOSPlatform("windows")]
+        private async Task TryAutoExecuteWebSearchAsync()
+        {
+            if (!this.AutoAllowWebSearch || this.PendingWebSearchRequest == null || this.IsGenerating)
+            {
+                return;
+            }
+
+            var request = this.PendingWebSearchRequest;
+            this.PendingWebSearchRequest = null;
+
+            this.LastActionMessage = request.IsDirectUrl
+                ? $"WebSearch auto-executed URL: {request.Url}"
+                : $"WebSearch auto-executed query: {request.Query}";
+            this.RequestUiRefresh();
+
+            var result = await this.Client.ExecuteWebSearchAsync(request);
+            string injection = this.Client.BuildWebSearchResultInjectionPrompt(result);
+            this.UserInput = AppendPromptForAgent(this.UserInput, injection);
+
+            this.LastActionMessage = result.Success
+                ? "WebSearch executed automatically. Result was appended to prompt."
+                : $"Auto WebSearch failed: {result.ErrorMessage ?? "Unknown error"}";
             this.RequestUiRefresh();
 
             if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
