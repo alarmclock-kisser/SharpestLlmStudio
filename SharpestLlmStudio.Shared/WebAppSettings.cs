@@ -10,6 +10,8 @@ namespace SharpestLlmStudio.Shared
         public string LogDirectory { get; set; } = string.Empty;
         public int MaxPreviousLogFiles { get; set; } = -1; // unlimited
         public bool EnableMonitoring { get; set; } = true;
+        public double PricePerKiloWattHour { get; set; }
+        public string CurrencySymbol { get; set; } = "$";
         public string DarkMode { get; set; } = "auto"; // "auto", "on", "off"
 
         public string ServerExecutablePath { get; set; } = "llama-server.exe";
@@ -25,6 +27,8 @@ namespace SharpestLlmStudio.Shared
         public double DefaultTemperature { get; set; } = 0.7;
         public double DefaultRepetitionPenalty { get; set; } = 1.1;
         public List<string> SystemPrompts { get; set; } = [];
+
+        public bool AddGenerationParametesToSystemPrompt { get; set; } = false;
         // Image handling defaults for generation
         // Use 0 to disable downsizing (send full-size images). Default is 720.
         public int DefaultImageMaxDimension { get; set; } = 720;

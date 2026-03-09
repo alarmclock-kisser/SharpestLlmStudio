@@ -11,6 +11,11 @@ namespace SharpestLlmStudio.Shared
     {
         // Static Fields
         public static int SparklineHistoryMax = 60;
+        private static readonly (string Open, string Close)[] ThinkTagPairs =
+        [
+            ("<think>", "</think>"),
+            ("◁think▷", "◁/think▷")
+        ];
 
 
 
@@ -220,7 +225,114 @@ namespace SharpestLlmStudio.Shared
                 return $"<pre class=\"md-code-block\"><code>{WebUtility.HtmlEncode(formattedJson)}</code></pre>";
             }
 
-            return RenderMarkdown(text);
+            return RenderWithThinkBlocks(text);
+        }
+
+        private static string RenderWithThinkBlocks(string text)
+        {
+            if (string.IsNullOrEmpty(text) || !ContainsThinkOpenTag(text))
+            {
+                return RenderMarkdown(text);
+            }
+
+            var sb = new StringBuilder();
+            int pos = 0;
+
+            while (pos < text.Length)
+            {
+                if (!TryFindNextThinkOpenTag(text, pos, out int thinkStart, out string openTag, out string closeTag))
+                {
+                    sb.Append(RenderMarkdown(text[pos..]));
+                    break;
+                }
+
+                if (thinkStart > pos)
+                {
+                    sb.Append(RenderMarkdown(text[pos..thinkStart]));
+                }
+
+                int contentStart = thinkStart + openTag.Length;
+                int thinkEnd = text.IndexOf(closeTag, contentStart, StringComparison.OrdinalIgnoreCase);
+
+                string thinkContent;
+                bool isComplete;
+
+                if (thinkEnd >= 0)
+                {
+                    thinkContent = text[contentStart..thinkEnd].Trim();
+                    pos = thinkEnd + closeTag.Length;
+                    isComplete = true;
+                }
+                else
+                {
+                    thinkContent = text[contentStart..].Trim();
+                    pos = text.Length;
+                    isComplete = false;
+                }
+
+                string lastLine = string.Empty;
+                var lines = thinkContent.Split('\n');
+                for (int i = lines.Length - 1; i >= 0; i--)
+                {
+                    var trimmed = lines[i].Trim();
+                    if (!string.IsNullOrEmpty(trimmed))
+                    {
+                        lastLine = trimmed;
+                        break;
+                    }
+                }
+
+                string statusLabel = isComplete ? "Thought Process" : "Thinking\u2026";
+                string preview = string.IsNullOrEmpty(lastLine)
+                    ? statusLabel
+                    : WebUtility.HtmlEncode(lastLine.Length > 120 ? lastLine[..120] + "\u2026" : lastLine);
+
+                sb.Append($"<details class=\"think-block\"{(isComplete ? "" : " open")}>");
+                sb.Append($"<summary class=\"think-summary\"><span class=\"think-label\">\U0001f4ad {statusLabel}</span><span class=\"think-preview\">{preview}</span></summary>");
+                sb.Append("<div class=\"think-content\">");
+                sb.Append(RenderMarkdown(thinkContent));
+                sb.Append("</div></details>");
+            }
+
+            return sb.ToString();
+        }
+
+        private static bool ContainsThinkOpenTag(string text)
+        {
+            foreach (var pair in ThinkTagPairs)
+            {
+                if (text.Contains(pair.Open, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryFindNextThinkOpenTag(string text, int startIndex, out int index, out string openTag, out string closeTag)
+        {
+            index = -1;
+            openTag = string.Empty;
+            closeTag = string.Empty;
+
+            foreach (var pair in ThinkTagPairs)
+            {
+                int candidate = text.IndexOf(pair.Open, startIndex, StringComparison.OrdinalIgnoreCase);
+                if (candidate < 0)
+                {
+                    continue;
+                }
+
+                if (index < 0 || candidate < index)
+                {
+                    index = candidate;
+                    openTag = pair.Open;
+                    closeTag = pair.Close;
+                }
+            }
+
+            return index >= 0;
         }
 
         public static string InlineMarkdown(string text)
@@ -278,8 +390,12 @@ namespace SharpestLlmStudio.Shared
 
             string source = !string.IsNullOrWhiteSpace(query) ? query : url;
             source = Truncate(source, 120);
-
-            return $"[WebSearch result: {source} | success={success} | status={statusCode}]";
+            string header = $"[WebSearch result] {source} | success={success} | status={statusCode}";
+            string raw = WebUtility.HtmlEncode(block.Trim());
+            return header
+                + "\n<details class=\"tool-websearch-details\"><summary>Show raw WebSearch result</summary>"
+                + $"<pre class=\"tool-raw\"><code>{raw}</code></pre>"
+                + "</details>";
         }
 
         private static string ExtractToolLineValue(string block, string prefix)

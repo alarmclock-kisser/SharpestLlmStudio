@@ -79,6 +79,16 @@ namespace SharpestLlmStudio.Runtime
             string assistantText = string.Empty;
             int maxRetries = 5;
             int retryCount = 0;
+            bool powerProfilingStarted = false;
+
+            try
+            {
+                this.GPUMonitor?.RestartPowerProfiling();
+                powerProfilingStarted = this.GPUMonitor != null;
+            }
+            catch
+            {
+            }
 
             lock (this._generationStatsLock)
             {
@@ -221,9 +231,27 @@ namespace SharpestLlmStudio.Runtime
                 }
                 finally
                 {
+                    double? usedWattsApprox = null;
+
+                    if (powerProfilingStarted)
+                    {
+                        try
+                        {
+                            usedWattsApprox = this.GPUMonitor?.EndPowerProfiling();
+                        }
+                        catch
+                        {
+                        }
+                    }
+
                     lock (this._generationStatsLock)
                     {
                         this.LastGenerationStats.GenerationFinished = DateTime.UtcNow;
+                        this.LastGenerationStats.UsedWattsApprox = usedWattsApprox;
+                        GenerationStats.AddCompletedGeneration(
+                            usedWattsApprox,
+                            this.LastGenerationStats.TotalGenerationTime,
+                            this._settings.PricePerKiloWattHour);
                     }
                 }
             }, cancellationToken);

@@ -39,10 +39,16 @@
     background: rgba(0, 0, 0, 0.04);
 }
 
-/* ── Scrollable content: everything ABOVE the footer scrolls here ── */
-.page-content {
+/* ── Wrapper for scrollable content + floating button ── */
+.page-content-wrapper {
     flex: 1 1 auto;
     min-height: 0;
+    position: relative;
+}
+
+/* ── Scrollable content: everything ABOVE the footer scrolls here ── */
+.page-content {
+    height: 100%;
     overflow-y: auto;
     overflow-x: hidden;
     padding-bottom: 0.5rem;
@@ -119,6 +125,7 @@
     border-radius: 8px;
     padding: 0.55rem 0.7rem;
     margin-bottom: 0.5rem;
+    position: relative;
 }
 
 .chat-message.user {
@@ -138,6 +145,51 @@
     font-weight: 700;
     opacity: 0.75;
     margin-bottom: 0.2rem;
+    padding-right: 4.5rem;
+}
+
+.chat-role-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.25rem;
+    min-height: 1rem;
+}
+
+.chat-timestamp {
+    position: absolute;
+    top: 0.48rem;
+    right: 0.7rem;
+    font-size: 0.56rem;
+    line-height: 1;
+    opacity: 0.42;
+    font-weight: 400;
+}
+
+.chat-scroll-bottom-button {
+    position: absolute;
+    right: 1.5rem;
+    bottom: 0.75rem;
+    width: 2.5rem;
+    height: 2.5rem;
+    border: 1px solid var(--rz-primary, #1976d2);
+    border-radius: 0.7rem;
+    background: var(--rz-base-background-color, #fff);
+    color: var(--rz-primary, #1976d2);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+    cursor: pointer;
+    z-index: 6;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.25rem;
+    font-weight: 700;
+    pointer-events: auto;
+}
+
+.chat-scroll-bottom-button:hover {
+    background: rgba(25, 118, 210, 0.08);
 }
 
 .chat-content {
@@ -211,6 +263,56 @@
 
 .chat-content ::deep a.md-link:hover {
     color: #1565c0;
+}
+
+/* ── Think-block collapsible (LM Studio style) ── */
+.chat-content ::deep .think-block {
+    border: 1px solid rgba(139, 195, 74, 0.3);
+    border-radius: 8px;
+    margin-bottom: 0.5rem;
+    background: rgba(139, 195, 74, 0.05);
+    overflow: hidden;
+}
+
+.chat-content ::deep .think-summary {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.7rem;
+    cursor: pointer;
+    font-size: 0.82rem;
+    color: var(--rz-text-secondary-color, #666);
+    user-select: none;
+    list-style: none;
+}
+
+.chat-content ::deep .think-summary::-webkit-details-marker {
+    display: none;
+}
+
+.chat-content ::deep .think-label {
+    font-weight: 600;
+    white-space: nowrap;
+    opacity: 0.9;
+}
+
+.chat-content ::deep .think-preview {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.55;
+    font-style: italic;
+    flex: 1;
+    min-width: 0;
+}
+
+.chat-content ::deep .think-content {
+    padding: 0.3rem 0.7rem 0.5rem;
+    border-top: 1px solid rgba(139, 195, 74, 0.2);
+    font-size: 0.85rem;
+    opacity: 0.8;
+    max-height: 50vh;
+    overflow-y: auto;
 }
 
 .chat-content ::deep details.tool-cmd-details {

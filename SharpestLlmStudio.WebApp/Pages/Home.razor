@@ -64,6 +64,9 @@
                                                 Data="@VM.LlamaModels"
                                                 TextProperty="DisplayName"
                                                 ValueProperty="Name"
+                                                AllowFiltering="true"
+                                                FilterCaseSensitivity="FilterCaseSensitivity.CaseInsensitive"
+                                                FilterOperator="StringFilterOperator.Contains"
                                                 Placeholder="Select a model…"
                                                 Disabled="@(VM.IsLoaded || VM.IsBusy)"
                                                 Style="width:100%;"
@@ -87,6 +90,8 @@
                 <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
                     <RadzenCheckBox @bind-Value="VM.UseFlashAttention" Disabled="@(VM.IsLoaded || VM.IsBusy)" TValue="bool" />
                     <RadzenLabel Text="Flash Attention" Style="cursor:pointer;" />
+                    <RadzenCheckBox @bind-Value="VM.NoWarmup" Disabled="@(VM.IsLoaded || VM.IsBusy)" TValue="bool" />
+                    <RadzenLabel Text="No Warmup" Style="cursor:pointer;" />
                 </RadzenStack>
 
                 <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" Wrap="FlexWrap.Wrap">
@@ -147,7 +152,9 @@
 
                 <RadzenButton Text="Save Context" Icon="save" ButtonStyle="ButtonStyle.Primary" Disabled="@(!VM.IsLoaded || VM.IsBusy || VM.IsGenerating)" Click="@VM.SaveContextAsync" />
 
-                <RadzenDropDown Data="VM.ContextFiles" @bind-Value="VM.SelectedContextFilePath" Placeholder="Saved contexts..." Style="width:320px;" Name="selectedContextFile" />
+                <RadzenDropDown Data="VM.ContextFileDisplayItems" @bind-Value="VM.SelectedContextFilePath"
+                               TextProperty="DisplayName" ValueProperty="FullPath"
+                               Placeholder="Saved contexts..." Style="width:320px;" Name="selectedContextFile" />
 
                 <RadzenButton Text="Load" Icon="upload" ButtonStyle="ButtonStyle.Info" Disabled="@(string.IsNullOrWhiteSpace(VM.SelectedContextFilePath) || VM.IsGenerating)" Click="@VM.LoadSelectedContextAsync" />
                 <RadzenButton Text="Delete" Icon="delete" ButtonStyle="ButtonStyle.Danger" Disabled="@(string.IsNullOrWhiteSpace(VM.SelectedContextFilePath) || VM.IsGenerating)" Click="@VM.DeleteSelectedContextAsync" />
@@ -259,8 +266,9 @@
         </div>
     </div>
 
-    <div id="chat-output" class="page-content">
-        <div class="home-shell">
+    <div class="page-content-wrapper">
+        <div id="chat-output" class="page-content">
+            <div class="home-shell">
     <RadzenCard class="chat-card">
         <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" JustifyContent="JustifyContent.SpaceBetween" class="rz-mb-2">
             <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
@@ -287,13 +295,27 @@
             @foreach (var message in VM.ChatMessages)
             {
                 <div class="chat-message @message.Role">
-                    <div class="chat-role">@message.Role.ToUpperInvariant()</div>
+                    <div class="chat-role-row">
+                        <span class="chat-role">@message.Role.ToUpperInvariant()</span>
+                        @if (message.CreatedAtUtc != default)
+                        {
+                            <span class="chat-timestamp">@message.CreatedAtUtc.ToLocalTime().ToString("HH:mm:ss")</span>
+                        }
+                    </div>
                     <div class="chat-content">@((MarkupString) VM.RenderChatContent(message.Content ?? string.Empty))</div>
                 </div>
             }
         }
     </RadzenCard>
+            </div>
         </div>
+        <button id="chat-scroll-bottom-button"
+                type="button"
+                class="chat-scroll-bottom-button"
+                title="Scroll to latest messages"
+                @onclick="VM.ScrollChatToBottomAsync">
+            ↓
+        </button>
     </div>
 
     <div id="chat-footer" class="chat-footer">
@@ -340,6 +362,7 @@
                             // Vertical stack or div
                             <div style="display:flex;flex-direction:column;gap:0.1rem;font-size:0.75rem;text-align:right;">
                                 <RadzenText TextStyle="TextStyle.Caption" class="generation-stats-caption generation-stats-in-footer" Text="@VM.GenerationStatsLast" />
+                                <RadzenText TextStyle="TextStyle.Caption" class="generation-stats-caption generation-stats-in-footer" Text="@VM.GenerationStatsPowerUsage" />
                                 <RadzenText TextStyle="TextStyle.Caption" class="generation-stats-caption generation-stats-in-footer" Text="@VM.GenerationStatsContingent" />
                             </div>
                         }
@@ -533,7 +556,10 @@
             return;
         }
 
-        await VM.OnSubsequentRenderAsync();
+        if (_vmRef != null)
+        {
+            await VM.OnSubsequentRenderAsync(_vmRef);
+        }
     }
 
     public void Dispose()

@@ -67,18 +67,14 @@ namespace SharpestLlmStudio.Runtime
                     args += $" --mmproj \"{request.ModelInfo.MmprojFilePath}\"";
                 }
 
-                if (request.UseFlashAttention)
+                bool enableFlashAttention = request.UseFlashAttention && !request.ModelInfo.IsTernaryQuantized;
+                if (request.UseFlashAttention && request.ModelInfo.IsTernaryQuantized)
                 {
-                    // Ternary quantized models (TQ1_0, TQ2_0) are incompatible with Flash Attention in CUDA
-                    if (request.ModelInfo.IsTernaryQuantized)
-                    {
-                        await StaticLogger.LogAsync($"[LlamaCpp] Flash Attention disabled automatically: model '{request.ModelInfo.Name}' uses ternary quantization (TQ) which is incompatible with --flash-attn.");
-                    }
-                    else
-                    {
-                        args += " --flash-attn on";
-                    }
+                    await StaticLogger.LogAsync($"[LlamaCpp] Flash Attention disabled automatically: model '{request.ModelInfo.Name}' uses ternary quantization (TQ) which is incompatible with --flash-attn.");
                 }
+
+                args += enableFlashAttention ? " --flash-attn on" : " --flash-attn off";
+                args += request.UseNoWarmup ? " --no-warmup" : "";
 
                 // Enable embedding endpoint for knowledge base vectorization
                 // NOTE: --embedding conflicts with multimodal (VL/mmproj) models — only enable when no mmproj is loaded
@@ -236,6 +232,14 @@ namespace SharpestLlmStudio.Runtime
                 return message
                     + "\n\nHint: This GGUF uses TQ2 quantization with tensor shapes that are incompatible with the current llama.cpp loader (block-size constraint). "
                     + "This is not a runtime flag issue. Try a newer llama.cpp build and/or a different quantization (e.g. Q4_K_M, Q5_K_M, Q8_0) for this model.";
+            }
+
+            if (serverOutput.Contains("tensor read out of bounds", StringComparison.OrdinalIgnoreCase)
+                || serverOutput.Contains("ggml-backend.cpp:272", StringComparison.OrdinalIgnoreCase))
+            {
+                return message
+                    + "\n\nHint: llama.cpp crashed inside ggml backend warmup for this GGUF. A common cause is Flash Attention being left on 'auto' and getting re-enabled internally. "
+                    + "SharpestLlmStudio now passes '--flash-attn off' explicitly when the checkbox is unchecked. If it still fails, try a newer llama.cpp build and/or disabling warmup with '--no-warmup' in the server command line for this model.";
             }
 
             return message;

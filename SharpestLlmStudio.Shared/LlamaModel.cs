@@ -185,6 +185,7 @@ namespace SharpestLlmStudio.Shared
 
         // Weitere optionale Server-Parameter für später (z.B. Flash Attention)
         public bool UseFlashAttention { get; set; } = true;
+        public bool UseNoWarmup { get; set; } = false;
     }
 
     public class LlamaModelLoadResult

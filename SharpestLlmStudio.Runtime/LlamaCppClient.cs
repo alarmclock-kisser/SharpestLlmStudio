@@ -142,6 +142,8 @@ namespace SharpestLlmStudio.Runtime
                     }
                 }
 
+                this.ResetConversation();
+
                 return processes.Count;
             }
             catch (Exception ex)

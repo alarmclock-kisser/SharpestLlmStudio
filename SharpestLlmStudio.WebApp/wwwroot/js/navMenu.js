@@ -34,7 +34,21 @@ window.sharpestNavMenu = {
             return;
         }
 
-        element.scrollTop = element.scrollHeight;
+        element._stickToBottom = true;
+        element._programmaticScroll = true;
+
+        const apply = () => {
+            element.scrollTop = element.scrollHeight;
+        };
+
+        apply();
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(apply);
+        }
+        setTimeout(() => {
+            apply();
+            element._programmaticScroll = false;
+        }, 0);
     },
 
     triggerClick: function (elementId) {
@@ -64,6 +78,7 @@ window.sharpestNavMenu = {
         if (!el) return;
 
         const updateSticky = function () {
+            if (el._programmaticScroll) return;
             const raw = Number.isFinite(thresholdPxOrRatio) ? thresholdPxOrRatio : 0.1;
             const threshold = raw > 0 && raw <= 1
                 ? Math.max(24, el.clientHeight * raw)
@@ -86,15 +101,62 @@ window.sharpestNavMenu = {
         const el = document.getElementById(elementId);
         if (!el) return;
 
-        const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-        const ratioThreshold = Math.max(24, el.clientHeight * 0.1);
-        if (distance <= ratioThreshold) {
-            el._stickToBottom = true;
+        if (el._stickToBottom !== false) {
+            el._programmaticScroll = true;
+            el.scrollTop = el.scrollHeight;
+            requestAnimationFrame(() => { el._programmaticScroll = false; });
+        }
+    },
+
+    setupScrollToBottomButton: function (scrollerId, buttonId) {
+        const scroller = document.getElementById(scrollerId);
+        if (!scroller) return;
+
+        const update = function () {
+            const button = document.getElementById(buttonId);
+            if (!button) return;
+
+            const scrollable = scroller.scrollHeight > scroller.clientHeight + 8;
+            const atBottom = (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) <= 24;
+            button.style.display = scrollable && !atBottom ? 'inline-flex' : 'none';
+        };
+
+        if (scroller._sharpestScrollBottomHandler) {
+            scroller.removeEventListener('scroll', scroller._sharpestScrollBottomHandler);
         }
 
-        if (el._stickToBottom !== false) {
-            el.scrollTop = el.scrollHeight;
+        scroller._sharpestScrollBottomHandler = update;
+        scroller.addEventListener('scroll', scroller._sharpestScrollBottomHandler, { passive: true });
+
+        if (scroller._sharpestScrollBottomResizeObserver) {
+            scroller._sharpestScrollBottomResizeObserver.disconnect();
         }
+
+        if (typeof ResizeObserver !== 'undefined') {
+            const resizeObserver = new ResizeObserver(update);
+            resizeObserver.observe(scroller);
+            if (scroller.firstElementChild) {
+                resizeObserver.observe(scroller.firstElementChild);
+            }
+            scroller._sharpestScrollBottomResizeObserver = resizeObserver;
+        }
+
+        if (scroller._sharpestScrollBottomMutationObserver) {
+            scroller._sharpestScrollBottomMutationObserver.disconnect();
+        }
+
+        if (typeof MutationObserver !== 'undefined') {
+            const mutationObserver = new MutationObserver(update);
+            mutationObserver.observe(scroller, { childList: true, subtree: true, characterData: true });
+            scroller._sharpestScrollBottomMutationObserver = mutationObserver;
+        }
+
+        update();
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(update);
+        }
+        setTimeout(update, 0);
+        setTimeout(update, 150);
     },
 
     bindFooterOffset: function (scrollerId, footerId, minOffsetPx) {
@@ -186,33 +248,108 @@ window.sharpestNavMenu = {
     },
 
     setupClipboardImagePaste: function (elementId, dotNetRef) {
-        const el = document.getElementById(elementId);
-        if (!el) return;
-        if (el._clipboardPasteHandler) {
-            el.removeEventListener('paste', el._clipboardPasteHandler);
+        window._sharpestClipboardDotNetRef = dotNetRef;
+
+        if (window._sharpestClipboardPasteHandler) {
+            return;
         }
-        el._clipboardPasteHandler = function (e) {
-            const items = (e.clipboardData || window.clipboardData)?.items;
-            if (!items) return;
-            for (let i = 0; i < items.length; i++) {
-                const item = items[i];
-                if (item.type.indexOf('image') !== -1) {
-                    e.preventDefault();
-                    const blob = item.getAsFile();
-                    if (!blob) continue;
-                    const reader = new FileReader();
-                    reader.onloadend = function () {
-                        const dataUrl = reader.result;
-                        if (dataUrl && typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) {
-                            dotNetRef.invokeMethodAsync('OnClipboardImagePasted', dataUrl, blob.type || 'image/png');
+
+        const getImageBlobFromClipboard = (clipboardData) => {
+            if (!clipboardData) return null;
+
+            const items = clipboardData.items;
+            if (items) {
+                for (let i = 0; i < items.length; i++) {
+                    const item = items[i];
+                    if (item && typeof item.type === 'string' && item.type.startsWith('image/')) {
+                        const blob = item.getAsFile();
+                        if (blob) {
+                            return blob;
                         }
-                    };
-                    reader.readAsDataURL(blob);
-                    break;
+                    }
                 }
             }
+
+            const files = clipboardData.files;
+            if (files) {
+                for (let i = 0; i < files.length; i++) {
+                    const file = files[i];
+                    if (file && typeof file.type === 'string' && file.type.startsWith('image/')) {
+                        return file;
+                    }
+                }
+            }
+
+            return null;
         };
-        el.addEventListener('paste', el._clipboardPasteHandler);
+
+        window._sharpestClipboardPasteHandler = function (e) {
+            const blob = getImageBlobFromClipboard(e.clipboardData || window.clipboardData);
+            if (!blob) {
+                return;
+            }
+
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            window._sharpestLastPasteHandled = Date.now();
+
+            const reader = new FileReader();
+            reader.onloadend = function () {
+                const dataUrl = reader.result;
+                if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
+                    return;
+                }
+
+                const ref = window._sharpestClipboardDotNetRef;
+                if (ref) {
+                    ref.invokeMethodAsync('OnClipboardImagePasted', dataUrl, blob.type || 'image/png');
+                }
+            };
+
+            reader.readAsDataURL(blob);
+        };
+
+        document.addEventListener('paste', window._sharpestClipboardPasteHandler, true);
+
+        // Also intercept via Clipboard API for Win+V / clipboard history scenarios
+        if (navigator.clipboard && navigator.clipboard.read) {
+            document.addEventListener('keydown', function (e) {
+                // Win+V triggers OS clipboard history — after selection, a paste event fires.
+                // Some browsers suppress the paste event for clipboard history items.
+                // This handler catches that scenario by reading the Clipboard API directly.
+                if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+                    // Let the paste event handler try first; use a short delay as fallback
+                    setTimeout(async () => {
+                        // Only act if the paste handler didn't already fire (guard via a flag)
+                        if (window._sharpestLastPasteHandled &&
+                            (Date.now() - window._sharpestLastPasteHandled) < 500) {
+                            return;
+                        }
+                        try {
+                            const items = await navigator.clipboard.read();
+                            for (const item of items) {
+                                const imageType = item.types.find(t => t.startsWith('image/'));
+                                if (imageType) {
+                                    const blob = await item.getType(imageType);
+                                    const reader = new FileReader();
+                                    reader.onloadend = function () {
+                                        const dataUrl = reader.result;
+                                        if (dataUrl && typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) {
+                                            const ref = window._sharpestClipboardDotNetRef;
+                                            if (ref) {
+                                                ref.invokeMethodAsync('OnClipboardImagePasted', dataUrl, imageType);
+                                            }
+                                        }
+                                    };
+                                    reader.readAsDataURL(blob);
+                                    break;
+                                }
+                            }
+                        } catch { /* clipboard read not permitted or empty */ }
+                    }, 150);
+                }
+            }, true);
+        }
     },
 
     getPrefersDarkMode: function () {

@@ -71,6 +71,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public int ContextSize { get; set; } = 1024;
         public bool UseMmproj { get; set; } = true;
         public bool UseFlashAttention { get; set; } = true;
+        public bool NoWarmup { get; set; } = false;
         public bool UseSystemPrompt { get; set; } = true;
         public bool IsolatedGeneration { get; set; } = false;
         public bool AutoSaveEnabled { get; set; } = true;
@@ -102,6 +103,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public bool HasJsonOutputFormat => !string.IsNullOrWhiteSpace(this.JsonOutputFormatTemplate);
 
         public ICollection<string> ContextFiles { get; private set; } = [];
+        public IEnumerable<ContextFileDisplayItem> ContextFileDisplayItems =>
+            this.ContextFiles.Select(f => new ContextFileDisplayItem(f, Path.GetFileNameWithoutExtension(f)));
         public bool IsCurrentContextSaved { get; private set; } = false;
 
 
@@ -293,7 +296,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public string GeneratedOutput { get; set; } = string.Empty;
         public bool IsGenerating { get; set; } = false;
 
-        public bool CanSend => !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput);
+        public bool CanSend =>! this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput);
         public string SystemPrompt { get; set; } = string.Empty;
 
         public List<LlamaChatMessage> ChatMessages { get; private set; } = [];
@@ -438,9 +441,10 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     return "";
                 }
 
-                string total = stats.TotalGenerationTime.HasValue ? $"{stats.TotalGenerationTime.Value.TotalSeconds:F1}s" : "-";
-                string ttft = stats.TimeTilFirstToken > 0 ? $"{stats.TimeTilFirstToken:F3}s" : "-";
-                return $"[{stats.TotalContextTokens} of {stats.ContextSize} tokens used]";
+                string cumulative = GenerationStats.AccumulatedUsedWattsApprox > 0.0
+                    ? $" | cost: {GenerationStats.AccumulatedUsedWattsApprox:F1} W ({this.Settings.CurrencySymbol}{GenerationStats.AccumulatedCostApprox:F6})"
+                    : string.Empty;
+                return $"{stats.TotalContextTokens} of {stats.ContextSize} tokens used{cumulative}";
             }
         }
 
@@ -456,7 +460,28 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
                 string total = stats.TotalGenerationTime.HasValue ? $"{stats.TotalGenerationTime.Value.TotalSeconds:F1}s" : "-";
                 string ttft = stats.TimeTilFirstToken > 0 ? $"{stats.TimeTilFirstToken:F3}s" : "-";
-                return $"(tok: {stats.TotalTokensGenerated} | tok/s: {stats.TokensPerSecond:F3} | TTFT: {ttft} | total: {total})";
+                return $"tok: {stats.TotalTokensGenerated} | tok/s: {stats.TokensPerSecond:F3} | TTFT: {ttft} | total: {total}";
+            }
+        }
+
+        public string GenerationStatsPowerUsage
+        {
+            get
+            {
+                var stats = this.LastGenerationStats;
+                if (stats == null)
+                {
+                    return "";
+                }
+                
+                double wattsUsed = Math.Max(0.0, stats.UsedWattsApprox ?? 0.0);
+                double timeElapsed = Math.Max(0.0, stats.TotalGenerationTime?.TotalHours ?? 0.0);
+                double pricePerKwh = this.Settings.PricePerKiloWattHour;
+                double price = (wattsUsed * timeElapsed / 1000.0) * pricePerKwh;
+                string currency = this.Settings.CurrencySymbol ?? "₪";
+                return wattsUsed > 0 && timeElapsed > 0
+                    ? $"power: {wattsUsed:F1} W | cost: {currency}{price:F6}"
+                    : "";
             }
         }
 
@@ -707,6 +732,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public async Task ResetConversationAsync()
         {
             this.Client.ResetConversation();
+            GenerationStats.ResetAccumulatedTotals();
 
             bool serverContextCleared = await this.Client.ClearServerContextAsync();
             if (!serverContextCleared && this.IsLoaded)
@@ -726,6 +752,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.IsCurrentContextSaved = false;
             this.SelectedContextFilePath = null;
             this.ContextSaveName = string.Empty;
+            this.LastGenerationStats = null;
             await this.RefreshContextAsync();
             try { this.NotifyStateChanged?.Invoke(); } catch { }
         }
@@ -777,6 +804,30 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
 
             try { this.NotifyStateChanged?.Invoke(); } catch { }
+        }
+
+        public async Task ScrollChatToBottomAsync()
+        {
+            try
+            {
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.scrollToBottom", ChatOutputElementId);
+            }
+            catch
+            {
+            }
+        }
+
+        private void CollapseManagementPanels(bool collapseContext = false, bool collapseKnowledge = false)
+        {
+            if (collapseContext)
+            {
+                this.IsContextPanelExpanded = false;
+            }
+
+            if (collapseKnowledge)
+            {
+                this.IsKnowledgePanelExpanded = false;
+            }
         }
 
         /*public async Task<ICollection<string>> UploadImagesAsync(IEnumerable<FileParameter> fileParameters, CancellationToken ct = default)
@@ -1103,6 +1154,9 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             finally
             {
                 this.IsGenerating = false;
+                this.LastGenerationStats = this.Client.GetLastGenerationStatsSnapshot();
+                this.RequestUiRefresh();
+                await this.ForceScrollToBottomAsync();
                 await this.TryAutoExecuteAllowedNonAdminCommandAsync();
                 await this.TryAutoExecuteWebSearchAsync();
                 this.RequestUiRefresh();
@@ -1410,6 +1464,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 this.SelectedContextFilePath = result.FilePath;
                 this.IsCurrentContextSaved = true;
+                this.CollapseManagementPanels(collapseContext: true);
             }
 
             this.LastActionMessage = result.Success
@@ -1433,6 +1488,10 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 : $"Context load failed: {Path.GetFileName(this.SelectedContextFilePath)}";
 
             this.IsCurrentContextSaved = success;
+            if (success)
+            {
+                this.CollapseManagementPanels(collapseContext: true);
+            }
 
             this.SyncChatMessagesFromClient();
             this.RequestUiRefresh();
@@ -1454,6 +1513,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 this.SelectedContextFilePath = null;
                 this.IsCurrentContextSaved = false;
+                this.CollapseManagementPanels(collapseContext: true);
             }
 
             await this.RefreshContextAsync();
@@ -1471,6 +1531,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.LastActionMessage = $"Knowledge upserted: {this.KnowledgeKey.Trim()}";
             this.KnowledgeKey = string.Empty;
             this.KnowledgeContent = string.Empty;
+            this.CollapseManagementPanels(collapseKnowledge: true);
 
             // Refresh local snapshot for UI
             try { this.KnowledgeEntries = this.Client.GetKnowledgeEntriesSnapshot(); } catch { this.KnowledgeEntries = []; }
@@ -1513,6 +1574,11 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 ? $"Imported {added} knowledge file(s)."
                 : "No knowledge files were imported.";
 
+            if (added > 0)
+            {
+                this.CollapseManagementPanels(collapseKnowledge: true);
+            }
+
             // Refresh local snapshot for UI
             try { this.KnowledgeEntries = this.Client.GetKnowledgeEntriesSnapshot(); } catch { this.KnowledgeEntries = []; }
             this.RequestUiRefresh();
@@ -1548,14 +1614,20 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         {
             string filePath = await this.Client.SaveKnowledgeStoreAsync();
             this.LastActionMessage = $"Knowledge store saved: {Path.GetFileName(filePath)}";
+            this.CollapseManagementPanels(collapseKnowledge: true);
             this.RequestUiRefresh();
         }
 
         public void ClearKnowledgeStore()
         {
             this.Client.ClearKnowledgeStore();
+            this.KnowledgeEntries = [];
             this.KnowledgeResults = [];
+            this.KnowledgeKey = string.Empty;
+            this.KnowledgeContent = string.Empty;
+            this.KnowledgeQuery = string.Empty;
             this.LastActionMessage = "Knowledge store cleared.";
+            this.CollapseManagementPanels(collapseKnowledge: true);
             this.RequestUiRefresh();
         }
 
@@ -1596,6 +1668,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 // Refresh local snapshot
                 this.KnowledgeEntries = this.Client.GetKnowledgeEntriesSnapshot();
                 this.LastActionMessage = $"Removed knowledge: {baseKey}";
+                this.CollapseManagementPanels(collapseKnowledge: true);
                 this.RequestUiRefresh();
             }
             catch (Exception ex)
@@ -1621,6 +1694,15 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             // Clear reused-instance flag because we killed servers
             this.IsReusedInstance = false;
+
+            // Reset conversation UI state (mirrors ResetConversationAsync)
+            this.GeneratedOutput = string.Empty;
+            this.ChatMessages = [];
+            this.IsCurrentContextSaved = false;
+            this.SelectedContextFilePath = null;
+            this.ContextSaveName = string.Empty;
+            GenerationStats.ResetAccumulatedTotals();
+
             this.RequestUiRefresh();
             return Task.CompletedTask;
         }
@@ -1642,10 +1724,25 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
 
         private readonly record struct ImageDisplayInfo(string Label, int EstimatedTokens);
+        public sealed record ContextFileDisplayItem(string FullPath, string DisplayName);
 
         private void RequestUiRefresh()
         {
             try { this.NotifyStateChanged?.Invoke(); } catch { }
+        }
+
+        private async Task ForceScrollToBottomAsync()
+        {
+            if (!this.AutoScrollEnabled)
+            {
+                return;
+            }
+
+            try
+            {
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.scrollToBottom", ChatOutputElementId);
+            }
+            catch { }
         }
 
         private void ScheduleModelPanelAutoCollapse()
@@ -1735,6 +1832,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupPromptEnter", "promptInput", vmRef);
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupClipboardImagePaste", "promptInput", vmRef);
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupConditionalAutoScroll", ChatOutputElementId, 0.1);
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupScrollToBottomButton", ChatOutputElementId, "chat-scroll-bottom-button");
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupVerticalResizeHandle", TopPanelsResizeHandleElementId, TopPanelsContentElementId, 140, 900);
             if (this.AutoScrollEnabled)
             {
@@ -1743,8 +1842,12 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this._lastChatMessageCount = this.ChatMessages.Count;
         }
 
-        public async Task OnSubsequentRenderAsync()
+        public async Task OnSubsequentRenderAsync(DotNetObjectReference<HomeViewModel> vmRef)
         {
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupPromptEnter", "promptInput", vmRef);
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupClipboardImagePaste", "promptInput", vmRef);
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupScrollToBottomButton", ChatOutputElementId, "chat-scroll-bottom-button");
+
             if (this._panelStateLoaded)
             {
                 await this.PersistPanelStatesAsync();
@@ -1759,7 +1862,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             if (this.AutoScrollEnabled && (this.ChatMessages.Count != this._lastChatMessageCount || this.IsGenerating))
             {
                 this._lastChatMessageCount = this.ChatMessages.Count;
-                await this.Js.InvokeVoidAsync("sharpestNavMenu.scrollToBottom", ChatOutputElementId);
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.autoScrollIfSticky", ChatOutputElementId);
             }
         }
 
@@ -2151,6 +2254,17 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     this.LoadedModel = null;
                     this.ModelLoadingTimeString = "Model unloaded.";
                     this.IsModelPanelExpanded = true;
+                    GenerationStats.ResetAccumulatedTotals();
+
+                    // Clear conversation and chat on unload so a fresh context is created for next model
+                    this.Client.ResetConversation();
+                    this.GeneratedOutput = string.Empty;
+                    this.ChatMessages = [];
+                    this.IsCurrentContextSaved = false;
+                    this.SelectedContextFilePath = null;
+                    this.ContextSaveName = string.Empty;
+                    this.LastGenerationStats = null;
+
                     await StaticLogger.LogAsync("[Blazor] Model unloaded successfully.");
                 }
                 else
@@ -2172,6 +2286,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                         BatchSize = Math.Max(1, this.Settings.DefaultBatchSize),
                         UseFlashAttention = this.UseFlashAttention,
                         IncludeMmproj = this.UseMmproj,
+                        UseNoWarmup = this.NoWarmup
                     };
 
                     await StaticLogger.LogAsync($"[Blazor] Loading model '{modelToLoad.Name}'...");
@@ -2194,6 +2309,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
                     if (response.Success)
                     {
+                        GenerationStats.ResetAccumulatedTotals();
                         this.ModelLoadingTimeString = response.ReusedExistingInstance
                             ? "Attached to existing llama-server instance."
                             : $"{sw.Elapsed.TotalSeconds:F3} sec. elapsed loading.";
@@ -2273,6 +2389,14 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 baseSystemPrompt = string.IsNullOrWhiteSpace(baseSystemPrompt)
                     ? toolInstructions
                     : baseSystemPrompt.Trim() + "\n\n" + toolInstructions;
+            }
+
+            if (this.Settings.AddGenerationParametesToSystemPrompt)
+            {
+                string genParams = $"[Generation Parameters: Temperature={this.GenTemperature:F2}, MaxTokens={this.GenMaxTokens}, ContextSize={this.ContextSize}, TopP={this.GenTopP:F2}, RepetitionPenalty={this.GenRepetitionPenalty:F2}]";
+                baseSystemPrompt = string.IsNullOrWhiteSpace(baseSystemPrompt)
+                    ? genParams
+                    : baseSystemPrompt.Trim() + "\n\n" + genParams;
             }
 
             if (!this.UseJsonOutputFormat || !this.HasJsonOutputFormat)
@@ -2397,7 +2521,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             return StaticLogics.GetSparklineSvg(this.gpuUsageHistory, width, height, this.SparklineGpuColor, StaticLogics.GetLighterColorGradient(this.SparklineGpuColor), this.GpuManufacturerName + " GPU");
         }
 
-        
+
 
 
     }
