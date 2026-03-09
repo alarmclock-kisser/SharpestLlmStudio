@@ -306,7 +306,12 @@ namespace SharpestLlmStudio.Runtime
             return this.CreateEmbeddingAsync(xml.ToString(SaveOptions.DisableFormatting), cancellationToken);
         }
 
-        public async Task<LlamaKnowledgeEntry> UpsertKnowledgeAsync(string key, string content, string? sourcePath = null, CancellationToken cancellationToken = default)
+        public int GetKnowledgeChunkCount(string content)
+        {
+            return SplitKnowledgeContent(content, 1400).Count;
+        }
+
+        public async Task<LlamaKnowledgeEntry> UpsertKnowledgeAsync(string key, string content, string? sourcePath = null, CancellationToken cancellationToken = default, Action<string>? progressCallback = null)
         {
             if (string.IsNullOrWhiteSpace(key))
             {
@@ -336,6 +341,8 @@ namespace SharpestLlmStudio.Runtime
                     SourcePath = sourcePath,
                     CreatedAtUtc = now
                 });
+
+                progressCallback?.Invoke(chunkKey);
             }
 
             lock (this._knowledgeLock)

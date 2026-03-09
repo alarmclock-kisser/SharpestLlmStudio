@@ -77,14 +77,33 @@ window.sharpestNavMenu = {
         const el = document.getElementById(elementId);
         if (!el) return;
 
-        const updateSticky = function () {
-            if (el._programmaticScroll) return;
+        const getThreshold = function () {
             const raw = Number.isFinite(thresholdPxOrRatio) ? thresholdPxOrRatio : 0.1;
-            const threshold = raw > 0 && raw <= 1
+            return raw > 0 && raw <= 1
                 ? Math.max(24, el.clientHeight * raw)
                 : Math.max(24, raw);
+        };
+
+        const isNearBottom = function () {
             const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-            el._stickToBottom = distance <= threshold;
+            return distance <= getThreshold();
+        };
+
+        const updateSticky = function () {
+            if (el._programmaticScroll) return;
+            el._stickToBottom = isNearBottom();
+        };
+
+        const maintainStickyBottom = function () {
+            if (el._stickToBottom === false) {
+                return;
+            }
+
+            window.sharpestNavMenu.scrollToBottom(elementId);
+
+            if (typeof el._sharpestScrollBottomHandler === 'function') {
+                el._sharpestScrollBottomHandler();
+            }
         };
 
         if (el._autoScrollHandler) {
@@ -94,6 +113,46 @@ window.sharpestNavMenu = {
         el._autoScrollHandler = updateSticky;
         el.addEventListener('scroll', el._autoScrollHandler, { passive: true });
 
+        if (el._conditionalAutoScrollResizeObserver) {
+            el._conditionalAutoScrollResizeObserver.disconnect();
+        }
+
+        if (typeof ResizeObserver !== 'undefined') {
+            const resizeObserver = new ResizeObserver(() => {
+                if (el._stickToBottom !== false) {
+                    maintainStickyBottom();
+                    return;
+                }
+
+                updateSticky();
+            });
+
+            resizeObserver.observe(el);
+            if (el.firstElementChild) {
+                resizeObserver.observe(el.firstElementChild);
+            }
+
+            el._conditionalAutoScrollResizeObserver = resizeObserver;
+        }
+
+        if (el._conditionalAutoScrollMutationObserver) {
+            el._conditionalAutoScrollMutationObserver.disconnect();
+        }
+
+        if (typeof MutationObserver !== 'undefined') {
+            const mutationObserver = new MutationObserver(() => {
+                if (el._stickToBottom !== false) {
+                    maintainStickyBottom();
+                    return;
+                }
+
+                updateSticky();
+            });
+
+            mutationObserver.observe(el, { childList: true, subtree: true, characterData: true });
+            el._conditionalAutoScrollMutationObserver = mutationObserver;
+        }
+
         updateSticky();
     },
 
@@ -102,9 +161,7 @@ window.sharpestNavMenu = {
         if (!el) return;
 
         if (el._stickToBottom !== false) {
-            el._programmaticScroll = true;
-            el.scrollTop = el.scrollHeight;
-            requestAnimationFrame(() => { el._programmaticScroll = false; });
+            window.sharpestNavMenu.scrollToBottom(elementId);
         }
     },
 

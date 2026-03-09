@@ -25,6 +25,7 @@ namespace SharpestLlmStudio.Shared
         public int MaxTokens { get; set; } = 1024;
         public double Temperature { get; set; } = 0.7;
         public double TopP { get; set; } = 0.9;
+        public int TopK { get; set; } = 40;
         public double RepetitionPenalty { get; set; } = 1.1;
         public string[]? StopSequences { get; set; }
         public bool Stream { get; set; } = true;
@@ -51,6 +52,39 @@ namespace SharpestLlmStudio.Shared
     {
         public required LlamaKnowledgeEntry Entry { get; set; }
         public double Similarity { get; set; }
+    }
+
+    public sealed class LlamaKnowledgeChunkV2
+    {
+        public string Id { get; set; } = Guid.NewGuid().ToString("N");
+        public string DocumentId { get; set; } = string.Empty;
+        public string SourceKey { get; set; } = string.Empty;
+        public string? SourcePath { get; set; }
+        public string ParentChunkId { get; set; } = string.Empty;
+        public int ParentIndex { get; set; }
+        public int ChunkIndex { get; set; }
+        public string CitationId { get; set; } = string.Empty;
+        public string Content { get; set; } = string.Empty;
+        public string Preview { get; set; } = string.Empty;
+        public string[] Keywords { get; set; } = [];
+        public float[] Vector { get; set; } = [];
+        public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    }
+
+    public sealed class LlamaKnowledgeSearchResultV2
+    {
+        public required LlamaKnowledgeChunkV2 Chunk { get; set; }
+        public double DenseScore { get; set; }
+        public double KeywordScore { get; set; }
+        public double RerankScore { get; set; }
+        public double FinalScore { get; set; }
+    }
+
+    public sealed class LlamaKnowledgePromptPackageV2
+    {
+        public string UserPrompt { get; set; } = string.Empty;
+        public string? SystemPromptInstructions { get; set; }
+        public IReadOnlyList<LlamaKnowledgeSearchResultV2> Results { get; set; } = [];
     }
 
     public sealed class LoadedImageMetadata

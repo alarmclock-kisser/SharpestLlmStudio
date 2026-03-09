@@ -25,6 +25,8 @@ namespace SharpestLlmStudio.Shared
         public int DefaultBatchSize { get; set; } = 512;
         public int DefaultMaxTokens { get; set; } = 2048;
         public double DefaultTemperature { get; set; } = 0.7;
+        public float DefaultTopP { get; set; } = 0.9f;
+        public int DefaultTopK { get; set; } = 40;
         public double DefaultRepetitionPenalty { get; set; } = 1.1;
         public List<string> SystemPrompts { get; set; } = [];
 
@@ -33,6 +35,9 @@ namespace SharpestLlmStudio.Shared
         // Use 0 to disable downsizing (send full-size images). Default is 720.
         public int DefaultImageMaxDimension { get; set; } = 720;
         public string DefaultImageFormat { get; set; } = "jpg";
+        public bool DefaultUseKnowledgeRagV2 { get; set; } = true;
+        public bool DefaultKnowledgeAutoChunkSize { get; set; } = true;
+        public int? DefaultKnowledgeChunkSize { get; set; }
         public bool AgentCommandReadOnlyMode { get; set; } = true;
         public bool AgentAllowElevatedCommands { get; set; } = true;
         public bool AgentShowCommandWindow { get; set; } = false;

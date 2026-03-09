@@ -363,6 +363,7 @@ namespace SharpestLlmStudio.Runtime
                 ["stream"] = request.Stream,
                 ["temperature"] = request.Temperature,
                 ["top_p"] = request.TopP,
+                ["top_k"] = request.TopK,
                 ["cache_prompt"] = !request.Isolated
             };
 

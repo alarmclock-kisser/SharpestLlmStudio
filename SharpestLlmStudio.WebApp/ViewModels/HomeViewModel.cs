@@ -35,7 +35,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         public static readonly IReadOnlyList<string> ModelSortOptions = ["A - Z", "Biggest", "Params", "Newest", "Vision"];
 
-        private string modelSortMode = "A - Z";
+        private string modelSortMode = "Newest";
         public string ModelSortMode
         {
             get => this.modelSortMode;
@@ -298,6 +298,21 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         public bool CanSend =>! this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput);
         public string SystemPrompt { get; set; } = string.Empty;
+        public string SystemPromptDisplay
+        {
+            get => FormatSystemPromptForDisplay(this.SystemPrompt);
+            set
+            {
+                string normalized = NormalizeSystemPromptFromDisplay(value);
+                if (string.Equals(this.SystemPrompt, normalized, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                this.SystemPrompt = normalized;
+                this.RequestUiRefresh();
+            }
+        }
 
         public List<LlamaChatMessage> ChatMessages { get; private set; } = [];
         // Sum of estimated tokens for uploaded images (updated on upload)
@@ -310,8 +325,65 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public string KnowledgeContent { get; set; } = string.Empty;
         public string KnowledgeQuery { get; set; } = string.Empty;
         public int KnowledgeTopK { get; set; } = 3;
+        private bool useKnowledgeRagV2;
+        public bool UseKnowledgeRagV2
+        {
+            get => this.useKnowledgeRagV2;
+            set
+            {
+                if (this.useKnowledgeRagV2 == value)
+                {
+                    return;
+                }
+
+                this.useKnowledgeRagV2 = value;
+                this.KnowledgeResults = [];
+                this.RefreshKnowledgeEntriesFromClient();
+            }
+        }
+        private bool knowledgeAutoChunkSize = true;
+        public bool KnowledgeAutoChunkSize
+        {
+            get => this.knowledgeAutoChunkSize;
+            set
+            {
+                this.knowledgeAutoChunkSize = value;
+                if (value)
+                {
+                    this.knowledgeChunkSize = null;
+                }
+                else if (!this.knowledgeChunkSize.HasValue)
+                {
+                    this.knowledgeChunkSize = 1024;
+                }
+
+                this.RequestUiRefresh();
+            }
+        }
+
+        private int? knowledgeChunkSize;
+        public int? KnowledgeChunkSize
+        {
+            get => this.knowledgeChunkSize;
+            set
+            {
+                this.knowledgeChunkSize = value.HasValue
+                    ? Math.Clamp(value.Value, 256, 4096)
+                    : null;
+                this.RequestUiRefresh();
+            }
+        }
+        public int? KnowledgeChunkSizeForRagV2 => this.UseKnowledgeRagV2 && !this.KnowledgeAutoChunkSize ? this.KnowledgeChunkSize : null;
+        public bool IsKnowledgeBusy { get; private set; }
+        public string KnowledgeBusyMessage { get; private set; } = string.Empty;
+        public int KnowledgeProgressPercent { get; private set; }
+        public string KnowledgeProgressCurrentItem { get; private set; } = string.Empty;
+        public string KnowledgeElapsedText { get; private set; } = "00:00";
         public IReadOnlyList<LlamaKnowledgeSearchResult> KnowledgeResults { get; private set; } = [];
         public IReadOnlyList<LlamaKnowledgeEntry> KnowledgeEntries { get; private set; } = [];
+        private CancellationTokenSource? knowledgeOperationCts;
+        private Stopwatch? knowledgeOperationStopwatch;
+        private System.Threading.Timer? knowledgeElapsedTimer;
 
         private readonly object lastActionMessageSync = new();
         private CancellationTokenSource? lastActionMessageCts;
@@ -388,6 +460,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
         }
         public float GenTopP { get; set; } = 0.9f;
+        public int GenTopK { get; set; } = 40;
+        public int GenBatchSize { get; set; } = 512;
 
         // Panel persistence constants
         public const string ModelExpandedStorageKey = "home.model.expanded";
@@ -498,6 +572,11 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.AutoContinueAgentActions = this.Settings.AgentAutoContinue;
             this.AllowAllNonAdminCommands = this.Settings.AllowAllNonAdminCommands;
             this.AutoAllowWebSearch = this.Settings.AutoAllowWebSearch;
+            this.useKnowledgeRagV2 = this.Settings.DefaultUseKnowledgeRagV2;
+            this.knowledgeAutoChunkSize = this.Settings.DefaultKnowledgeAutoChunkSize || !this.Settings.DefaultKnowledgeChunkSize.HasValue;
+            this.knowledgeChunkSize = this.knowledgeAutoChunkSize
+                ? this.Settings.DefaultBatchSize
+                : this.Settings.DefaultKnowledgeChunkSize ?? this.Settings.DefaultBatchSize;
             this.SystemPrompt = this.BuildDefaultSystemPromptFromSettings();
             // Initialize image preferences from settings defaults
             this.ImageMaxDimension = Math.Max(0, this.Settings.DefaultImageMaxDimension);
@@ -1011,6 +1090,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             string prompt = this.UserInput.Trim();
             string promptForGeneration = prompt;
             string assistantText = string.Empty;
+            string? requestSystemPrompt = null;
 
             this.IsGenerating = true;
             this.GeneratedOutput = string.Empty;
@@ -1040,12 +1120,23 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             try
             {
+                requestSystemPrompt = this.BuildEffectiveSystemPrompt();
+
                 // Automatically augment prompt with knowledge context when available
                 if (this.KnowledgeEntries.Count > 0)
                 {
                     try
                     {
-                        promptForGeneration = await this.Client.BuildKnowledgeAugmentedPromptAsync(prompt, this.KnowledgeTopK, this.ContextSize, this.GenMaxTokens, this.generationCts.Token);
+                        if (this.UseKnowledgeRagV2)
+                        {
+                            var promptPackage = await this.Client.BuildKnowledgePromptPackageV2Async(prompt, this.KnowledgeTopK, this.ContextSize, this.GenMaxTokens, this.generationCts.Token);
+                            promptForGeneration = promptPackage.UserPrompt;
+                            requestSystemPrompt = this.BuildEffectiveSystemPrompt(promptPackage.SystemPromptInstructions);
+                        }
+                        else
+                        {
+                            promptForGeneration = await this.Client.BuildKnowledgeAugmentedPromptAsync(prompt, this.KnowledgeTopK, this.ContextSize, this.GenMaxTokens, this.generationCts.Token);
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -1065,11 +1156,12 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     Temperature = this.GenTemperature,
                     RepetitionPenalty = (double)this.GenRepetitionPenalty,
                     TopP = this.GenTopP,
+                    TopK = this.GenTopK,
                     // Pass image prefs from UI into the generation request
                     MaxWidthAndHeight = this.ImageMaxDimension,
                     ImageFormat = this.ImageFormat,
                     Stream = true,
-                    SystemPrompt = this.BuildEffectiveSystemPrompt()
+                    SystemPrompt = requestSystemPrompt
                 };
 
                 // Clear image attachments immediately after capturing them for the request
@@ -1193,7 +1285,10 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     ?? this.LlamaModels.FirstOrDefault()?.Name;
 
                 this.GenMaxTokens = this.Settings.DefaultMaxTokens;
+                this.GenBatchSize = this.Settings.DefaultBatchSize;
                 this.GenTemperature = (float) this.Settings.DefaultTemperature;
+                this.GenTopP = (float) this.Settings.DefaultTopP;
+                this.GenTopK = this.Settings.DefaultTopK;
                 this.GenRepetitionPenalty = (decimal)this.Settings.DefaultRepetitionPenalty;
 
 
@@ -1522,66 +1617,165 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         public async Task AddKnowledgeAsync()
         {
-            if (string.IsNullOrWhiteSpace(this.KnowledgeKey) || string.IsNullOrWhiteSpace(this.KnowledgeContent))
+            if (this.IsKnowledgeBusy || string.IsNullOrWhiteSpace(this.KnowledgeKey) || string.IsNullOrWhiteSpace(this.KnowledgeContent))
             {
                 return;
             }
 
-            _ = await this.Client.UpsertKnowledgeAsync(this.KnowledgeKey.Trim(), this.KnowledgeContent.Trim());
-            this.LastActionMessage = $"Knowledge upserted: {this.KnowledgeKey.Trim()}";
-            this.KnowledgeKey = string.Empty;
-            this.KnowledgeContent = string.Empty;
-            this.CollapseManagementPanels(collapseKnowledge: true);
+            string key = this.KnowledgeKey.Trim();
+            string content = this.KnowledgeContent.Trim();
 
-            // Refresh local snapshot for UI
-            try { this.KnowledgeEntries = this.Client.GetKnowledgeEntriesSnapshot(); } catch { this.KnowledgeEntries = []; }
-            this.RequestUiRefresh();
+            await this.RunKnowledgeOperationAsync("Knowledge Base is being vectorized...", async ct =>
+            {
+                int totalChunks = Math.Max(1, this.UseKnowledgeRagV2
+                    ? this.Client.GetKnowledgeChunkCountV2(content, this.KnowledgeChunkSizeForRagV2)
+                    : this.Client.GetKnowledgeChunkCount(content));
+                int completedChunks = 0;
+                this.UpdateKnowledgeProgress(0, totalChunks, key);
+
+                if (this.UseKnowledgeRagV2)
+                {
+                    _ = await this.Client.UpsertKnowledgeV2Async(
+                        key,
+                        content,
+                        cancellationToken: ct,
+                        chunkSize: this.KnowledgeChunkSizeForRagV2,
+                        progressCallback: currentItem =>
+                        {
+                            int done = System.Threading.Interlocked.Increment(ref completedChunks);
+                            this.UpdateKnowledgeProgress(done, totalChunks, currentItem);
+                        });
+                }
+                else
+                {
+                    _ = await this.Client.UpsertKnowledgeAsync(
+                        key,
+                        content,
+                        cancellationToken: ct,
+                        progressCallback: currentItem =>
+                        {
+                            int done = System.Threading.Interlocked.Increment(ref completedChunks);
+                            this.UpdateKnowledgeProgress(done, totalChunks, currentItem);
+                        });
+                }
+
+                this.UpdateKnowledgeProgress(totalChunks, totalChunks, key);
+                this.LastActionMessage = $"Knowledge upserted: {key}";
+                this.KnowledgeKey = string.Empty;
+                this.KnowledgeContent = string.Empty;
+                this.CollapseManagementPanels(collapseKnowledge: true);
+                this.RefreshKnowledgeEntriesFromClient();
+            });
         }
 
         public async Task AddKnowledgeFromFilesAsync(IEnumerable<IBrowserFile> files, CancellationToken cancellationToken = default)
         {
-            if (files == null)
+            if (this.IsKnowledgeBusy || files == null)
             {
                 return;
             }
 
-            int added = 0;
-            foreach (var file in files)
+            await this.RunKnowledgeOperationAsync("Knowledge files are being imported and embedded...", async ct =>
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                try
+                var workItems = new List<KnowledgeImportWorkItem>();
+                foreach (var file in files)
                 {
-                    using var stream = file.OpenReadStream(50 * 1024 * 1024, cancellationToken);
-                    using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
-                    string content = await reader.ReadToEndAsync(cancellationToken);
-                    if (string.IsNullOrWhiteSpace(content))
+                    ct.ThrowIfCancellationRequested();
+
+                    try
                     {
-                        continue;
+                        using var stream = file.OpenReadStream(50 * 1024 * 1024, ct);
+                        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                        string content = await reader.ReadToEndAsync(ct);
+                        if (string.IsNullOrWhiteSpace(content))
+                        {
+                            continue;
+                        }
+
+                        string key = Path.GetFileName(file.Name);
+                        int chunkCount = this.UseKnowledgeRagV2
+                            ? Math.Max(1, this.Client.GetKnowledgeChunkCountV2(content, this.KnowledgeChunkSizeForRagV2))
+                            : Math.Max(1, this.Client.GetKnowledgeChunkCount(content));
+                        workItems.Add(new KnowledgeImportWorkItem(key, content, file.Name, chunkCount));
                     }
-
-                    string key = Path.GetFileName(file.Name);
-                    await this.Client.UpsertKnowledgeAsync(key, content, file.Name, cancellationToken);
-                    added++;
+                    catch (Exception ex)
+                    {
+                        await StaticLogger.LogAsync($"[HomeViewModel] Could not import knowledge file '{file.Name}': {ex.Message}");
+                    }
                 }
-                catch (Exception ex)
+
+                if (workItems.Count == 0)
                 {
-                    await StaticLogger.LogAsync($"[HomeViewModel] Could not import knowledge file '{file.Name}': {ex.Message}");
+                    this.LastActionMessage = "No knowledge files were imported.";
+                    this.RefreshKnowledgeEntriesFromClient();
+                    return;
                 }
-            }
 
-            this.LastActionMessage = added > 0
-                ? $"Imported {added} knowledge file(s)."
-                : "No knowledge files were imported.";
+                int totalChunks = workItems.Sum(w => w.ChunkCount);
+                int completedChunks = 0;
+                int added = 0;
+                this.UpdateKnowledgeProgress(0, totalChunks, workItems[0].Key);
 
-            if (added > 0)
-            {
-                this.CollapseManagementPanels(collapseKnowledge: true);
-            }
+                int maxParallelism = Math.Clamp(Environment.ProcessorCount / 2, 1, Math.Min(4, workItems.Count));
+                var parallelOptions = new ParallelOptions
+                {
+                    CancellationToken = ct,
+                    MaxDegreeOfParallelism = maxParallelism
+                };
 
-            // Refresh local snapshot for UI
-            try { this.KnowledgeEntries = this.Client.GetKnowledgeEntriesSnapshot(); } catch { this.KnowledgeEntries = []; }
-            this.RequestUiRefresh();
+                await Parallel.ForEachAsync(workItems, parallelOptions, async (item, ct) =>
+                {
+                    try
+                    {
+                        if (this.UseKnowledgeRagV2)
+                        {
+                            await this.Client.UpsertKnowledgeV2Async(
+                                item.Key,
+                                item.Content,
+                                item.SourcePath,
+                                ct,
+                                this.KnowledgeChunkSizeForRagV2,
+                                currentItem =>
+                                {
+                                    int done = System.Threading.Interlocked.Increment(ref completedChunks);
+                                    this.UpdateKnowledgeProgress(done, totalChunks, currentItem);
+                                });
+                        }
+                        else
+                        {
+                            await this.Client.UpsertKnowledgeAsync(
+                                item.Key,
+                                item.Content,
+                                item.SourcePath,
+                                ct,
+                                currentItem =>
+                                {
+                                    int done = System.Threading.Interlocked.Increment(ref completedChunks);
+                                    this.UpdateKnowledgeProgress(done, totalChunks, currentItem);
+                                });
+                        }
+
+                        System.Threading.Interlocked.Increment(ref added);
+                    }
+                    catch (Exception ex)
+                    {
+                        await StaticLogger.LogAsync($"[HomeViewModel] Could not import knowledge file '{item.SourcePath}': {ex.Message}");
+                    }
+                });
+
+                this.UpdateKnowledgeProgress(totalChunks, totalChunks, string.Empty);
+
+                this.LastActionMessage = added > 0
+                    ? $"Imported {added} knowledge file(s)."
+                    : "No knowledge files were imported.";
+
+                if (added > 0)
+                {
+                    this.CollapseManagementPanels(collapseKnowledge: true);
+                }
+
+                this.RefreshKnowledgeEntriesFromClient();
+            });
         }
 
         public async Task SearchKnowledgeAsync()
@@ -1593,39 +1787,78 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 return;
             }
 
-            try
+            if (this.IsKnowledgeBusy)
             {
-                this.KnowledgeResults = await this.Client.SearchKnowledgeAsync(this.KnowledgeQuery.Trim(), this.KnowledgeTopK);
-                this.LastActionMessage = this.KnowledgeResults.Count == 0
-                    ? "No matching knowledge entries found."
-                    : $"Found {this.KnowledgeResults.Count} matching knowledge entries.";
-            }
-            catch (Exception ex)
-            {
-                this.KnowledgeResults = [];
-                this.LastActionMessage = "Knowledge search failed.";
-                await StaticLogger.LogAsync(ex, "[HomeViewModel] Error while searching knowledge");
+                return;
             }
 
-            this.RequestUiRefresh();
+            string query = this.KnowledgeQuery.Trim();
+            await this.RunKnowledgeOperationAsync("Knowledge Base is being searched...", async ct =>
+            {
+                try
+                {
+                    if (this.UseKnowledgeRagV2)
+                    {
+                        var resultsV2 = await this.Client.SearchKnowledgeV2Async(query, this.KnowledgeTopK, cancellationToken: ct);
+                        this.KnowledgeResults = MapKnowledgeResultsV2ToUi(resultsV2);
+                    }
+                    else
+                    {
+                        this.KnowledgeResults = await this.Client.SearchKnowledgeAsync(query, this.KnowledgeTopK, cancellationToken: ct);
+                    }
+
+                    this.LastActionMessage = this.KnowledgeResults.Count == 0
+                        ? "No matching knowledge entries found."
+                        : $"Found {this.KnowledgeResults.Count} matching knowledge entries.";
+                }
+                catch (Exception ex)
+                {
+                    this.KnowledgeResults = [];
+                    this.LastActionMessage = "Knowledge search failed.";
+                    await StaticLogger.LogAsync(ex, "[HomeViewModel] Error while searching knowledge");
+                }
+            });
         }
 
         public async Task SaveKnowledgeStoreAsync()
         {
-            string filePath = await this.Client.SaveKnowledgeStoreAsync();
-            this.LastActionMessage = $"Knowledge store saved: {Path.GetFileName(filePath)}";
-            this.CollapseManagementPanels(collapseKnowledge: true);
-            this.RequestUiRefresh();
+            if (this.IsKnowledgeBusy)
+            {
+                return;
+            }
+
+            await this.RunKnowledgeOperationAsync("Knowledge Store is being saved...", async ct =>
+            {
+                string filePath = this.UseKnowledgeRagV2
+                    ? await this.Client.SaveKnowledgeStoreV2Async(cancellationToken: ct)
+                    : await this.Client.SaveKnowledgeStoreAsync(cancellationToken: ct);
+                this.LastActionMessage = $"Knowledge store saved: {Path.GetFileName(filePath)}";
+                this.CollapseManagementPanels(collapseKnowledge: true);
+            });
         }
 
         public void ClearKnowledgeStore()
         {
-            this.Client.ClearKnowledgeStore();
+            if (this.IsKnowledgeBusy)
+            {
+                return;
+            }
+
+            if (this.UseKnowledgeRagV2)
+            {
+                this.Client.ClearKnowledgeStoreV2();
+            }
+            else
+            {
+                this.Client.ClearKnowledgeStore();
+            }
+
             this.KnowledgeEntries = [];
             this.KnowledgeResults = [];
             this.KnowledgeKey = string.Empty;
             this.KnowledgeContent = string.Empty;
             this.KnowledgeQuery = string.Empty;
+            this.ResetKnowledgeProgress();
             this.LastActionMessage = "Knowledge store cleared.";
             this.CollapseManagementPanels(collapseKnowledge: true);
             this.RequestUiRefresh();
@@ -1633,48 +1866,55 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         public async Task DeleteKnowledgeByKeyAsync(string baseKey)
         {
-            if (string.IsNullOrWhiteSpace(baseKey))
+            if (this.IsKnowledgeBusy || string.IsNullOrWhiteSpace(baseKey))
             {
                 return;
             }
 
-            try
+            await this.RunKnowledgeOperationAsync("Knowledge entry is being removed...", async ct =>
             {
-                var snapshot = this.Client.GetKnowledgeEntriesSnapshot().ToList();
-                var remaining = snapshot.Where(k =>
+                try
+                {
+                    if (this.UseKnowledgeRagV2)
                     {
-                        var idx = k.Key.IndexOf(" [chunk ", StringComparison.OrdinalIgnoreCase);
-                        var bk = idx >= 0 ? k.Key.Substring(0, idx) : k.Key;
-                        return !string.Equals(bk, baseKey, StringComparison.OrdinalIgnoreCase);
-                    }).ToList();
+                        this.Client.DeleteKnowledgeBySourceKeyV2(baseKey);
+                    }
+                    else
+                    {
+                        var snapshot = this.Client.GetKnowledgeEntriesSnapshot().ToList();
+                        var remaining = snapshot.Where(k =>
+                        {
+                            var idx = k.Key.IndexOf(" [chunk ", StringComparison.OrdinalIgnoreCase);
+                            var bk = idx >= 0 ? k.Key.Substring(0, idx) : k.Key;
+                            return !string.Equals(bk, baseKey, StringComparison.OrdinalIgnoreCase);
+                        }).ToList();
 
-                // Rebuild store: clear then re-insert remaining knowledge grouped by base key
-                this.Client.ClearKnowledgeStore();
+                        this.Client.ClearKnowledgeStore();
 
-                var groups = remaining.GroupBy(k =>
-                {
-                    var idx = k.Key.IndexOf(" [chunk ", StringComparison.OrdinalIgnoreCase);
-                    return idx >= 0 ? k.Key.Substring(0, idx) : k.Key;
-                });
+                        var groups = remaining.GroupBy(k =>
+                        {
+                            var idx = k.Key.IndexOf(" [chunk ", StringComparison.OrdinalIgnoreCase);
+                            return idx >= 0 ? k.Key.Substring(0, idx) : k.Key;
+                        });
 
-                foreach (var g in groups)
-                {
-                    string key = g.Key;
-                    string combined = string.Join("\n\n", g.Select(x => x.Content ?? string.Empty));
-                    string? source = g.Select(x => x.SourcePath).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p));
-                    await this.Client.UpsertKnowledgeAsync(key, combined, source);
+                        foreach (var g in groups)
+                        {
+                            string key = g.Key;
+                            string combined = string.Join("\n\n", g.Select(x => x.Content ?? string.Empty));
+                            string? source = g.Select(x => x.SourcePath).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p));
+                            await this.Client.UpsertKnowledgeAsync(key, combined, source, ct);
+                        }
+                    }
+
+                    this.RefreshKnowledgeEntriesFromClient();
+                    this.LastActionMessage = $"Removed knowledge: {baseKey}";
+                    this.CollapseManagementPanels(collapseKnowledge: true);
                 }
-
-                // Refresh local snapshot
-                this.KnowledgeEntries = this.Client.GetKnowledgeEntriesSnapshot();
-                this.LastActionMessage = $"Removed knowledge: {baseKey}";
-                this.CollapseManagementPanels(collapseKnowledge: true);
-                this.RequestUiRefresh();
-            }
-            catch (Exception ex)
-            {
-                await StaticLogger.LogAsync(ex, "[HomeViewModel] Error deleting knowledge by key");
-            }
+                catch (Exception ex)
+                {
+                    await StaticLogger.LogAsync(ex, "[HomeViewModel] Error deleting knowledge by key");
+                }
+            });
         }
 
         public Task KillAllLlamaServerExeInstancesAsync()
@@ -1698,6 +1938,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             // Reset conversation UI state (mirrors ResetConversationAsync)
             this.GeneratedOutput = string.Empty;
             this.ChatMessages = [];
+            this.ResetKnowledgeBaseState();
             this.IsCurrentContextSaved = false;
             this.SelectedContextFilePath = null;
             this.ContextSaveName = string.Empty;
@@ -1724,11 +1965,156 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
 
         private readonly record struct ImageDisplayInfo(string Label, int EstimatedTokens);
+        private sealed record KnowledgeImportWorkItem(string Key, string Content, string SourcePath, int ChunkCount);
         public sealed record ContextFileDisplayItem(string FullPath, string DisplayName);
 
         private void RequestUiRefresh()
         {
             try { this.NotifyStateChanged?.Invoke(); } catch { }
+        }
+
+        private void RefreshKnowledgeEntriesFromClient()
+        {
+            try
+            {
+                this.KnowledgeEntries = this.UseKnowledgeRagV2
+                    ? this.Client.GetKnowledgeEntriesV2Snapshot()
+                    : this.Client.GetKnowledgeEntriesSnapshot();
+            }
+            catch
+            {
+                this.KnowledgeEntries = [];
+            }
+
+            this.RequestUiRefresh();
+        }
+
+        private void ResetKnowledgeBaseState()
+        {
+            this.Client.ClearKnowledgeStore();
+            this.Client.ClearKnowledgeStoreV2();
+            this.KnowledgeEntries = [];
+            this.KnowledgeResults = [];
+            this.KnowledgeKey = string.Empty;
+            this.KnowledgeContent = string.Empty;
+            this.KnowledgeQuery = string.Empty;
+            this.ResetKnowledgeProgress();
+        }
+
+        private void UpdateKnowledgeProgress(int completed, int total, string? currentItem)
+        {
+            int safeTotal = Math.Max(1, total);
+            int safeCompleted = Math.Clamp(completed, 0, safeTotal);
+            this.KnowledgeProgressPercent = (int)Math.Round((safeCompleted * 100.0) / safeTotal);
+            this.KnowledgeProgressCurrentItem = currentItem?.Trim() ?? string.Empty;
+            this.RequestUiRefresh();
+        }
+
+        private void ResetKnowledgeProgress()
+        {
+            this.KnowledgeProgressPercent = 0;
+            this.KnowledgeProgressCurrentItem = string.Empty;
+            this.KnowledgeElapsedText = "00:00";
+        }
+
+        private IReadOnlyList<LlamaKnowledgeSearchResult> MapKnowledgeResultsV2ToUi(IReadOnlyList<LlamaKnowledgeSearchResultV2> results)
+        {
+            return results.Select(r => new LlamaKnowledgeSearchResult
+            {
+                Entry = new LlamaKnowledgeEntry
+                {
+                    Id = r.Chunk.Id,
+                    Key = $"{r.Chunk.SourceKey} [{r.Chunk.CitationId}]",
+                    Content = r.Chunk.Content,
+                    SourcePath = r.Chunk.SourcePath,
+                    Vector = r.Chunk.Vector,
+                    CreatedAtUtc = r.Chunk.CreatedAtUtc
+                },
+                Similarity = r.FinalScore
+            }).ToList();
+        }
+
+        private string? BuildEffectiveSystemPrompt(string? additionalInstructions)
+        {
+            string? basePrompt = this.BuildEffectiveSystemPrompt();
+            if (string.IsNullOrWhiteSpace(additionalInstructions))
+            {
+                return basePrompt;
+            }
+
+            return string.IsNullOrWhiteSpace(basePrompt)
+                ? additionalInstructions.Trim()
+                : basePrompt.Trim() + "\n\n" + additionalInstructions.Trim();
+        }
+
+        public void CancelKnowledgeOperation()
+        {
+            try
+            {
+                this.knowledgeOperationCts?.Cancel();
+            }
+            catch
+            {
+            }
+        }
+
+        private void StartKnowledgeElapsedTimer()
+        {
+            this.knowledgeOperationStopwatch = Stopwatch.StartNew();
+            this.KnowledgeElapsedText = "00:00";
+            this.knowledgeElapsedTimer?.Dispose();
+            this.knowledgeElapsedTimer = new System.Threading.Timer(_ =>
+            {
+                var stopwatch = this.knowledgeOperationStopwatch;
+                if (stopwatch == null)
+                {
+                    return;
+                }
+
+                TimeSpan elapsed = stopwatch.Elapsed;
+                this.KnowledgeElapsedText = elapsed.TotalHours >= 1
+                    ? $"{(int)elapsed.TotalHours:00}:{elapsed.Minutes:00}:{elapsed.Seconds:00}"
+                    : $"{elapsed.Minutes:00}:{elapsed.Seconds:00}";
+                this.RequestUiRefresh();
+            }, null, TimeSpan.Zero, TimeSpan.FromSeconds(1));
+        }
+
+        private void StopKnowledgeElapsedTimer()
+        {
+            this.knowledgeElapsedTimer?.Dispose();
+            this.knowledgeElapsedTimer = null;
+            this.knowledgeOperationStopwatch?.Stop();
+            this.knowledgeOperationStopwatch = null;
+        }
+
+        private async Task RunKnowledgeOperationAsync(string busyMessage, Func<CancellationToken, Task> operation, CancellationToken cancellationToken = default)
+        {
+            this.knowledgeOperationCts?.Dispose();
+            this.knowledgeOperationCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            this.IsKnowledgeBusy = true;
+            this.KnowledgeBusyMessage = busyMessage;
+            this.ResetKnowledgeProgress();
+            this.StartKnowledgeElapsedTimer();
+            this.RequestUiRefresh();
+
+            try
+            {
+                await operation(this.knowledgeOperationCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                this.LastActionMessage = "Knowledge operation canceled.";
+            }
+            finally
+            {
+                this.StopKnowledgeElapsedTimer();
+                this.IsKnowledgeBusy = false;
+                this.KnowledgeBusyMessage = string.Empty;
+                this.knowledgeOperationCts?.Dispose();
+                this.knowledgeOperationCts = null;
+                this.ResetKnowledgeProgress();
+                this.RequestUiRefresh();
+            }
         }
 
         private async Task ForceScrollToBottomAsync()
@@ -1847,6 +2233,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         {
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupPromptEnter", "promptInput", vmRef);
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupClipboardImagePaste", "promptInput", vmRef);
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupConditionalAutoScroll", ChatOutputElementId, 0.1);
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupScrollToBottomButton", ChatOutputElementId, "chat-scroll-bottom-button");
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupThinkBlocks", ChatOutputElementId);
 
@@ -2213,6 +2600,11 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             this.autoRefreshTimer?.Dispose();
             this.autoRefreshTimer = null;
+            this.knowledgeElapsedTimer?.Dispose();
+            this.knowledgeElapsedTimer = null;
+            this.knowledgeOperationCts?.Cancel();
+            this.knowledgeOperationCts?.Dispose();
+            this.knowledgeOperationCts = null;
 
             GC.SuppressFinalize(this);
         }
@@ -2262,6 +2654,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     this.Client.ResetConversation();
                     this.GeneratedOutput = string.Empty;
                     this.ChatMessages = [];
+                    this.ResetKnowledgeBaseState();
                     this.IsCurrentContextSaved = false;
                     this.SelectedContextFilePath = null;
                     this.ContextSaveName = string.Empty;
@@ -2271,6 +2664,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 }
                 else
                 {
+                    this.ResetKnowledgeBaseState();
+
                     // Load
                     LlamaModelInfo? modelToLoad = this.LlamaModels.FirstOrDefault(m => m.Name.Equals(this.SelectedModelName, StringComparison.OrdinalIgnoreCase));
                     if (modelToLoad == null)
@@ -2285,7 +2680,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                         ModelInfo = modelToLoad,
                         ServerExecutablePath = this.Settings.ServerExecutablePath,
                         ContextSize = this.ContextSize,
-                        BatchSize = Math.Max(1, this.Settings.DefaultBatchSize),
+                        BatchSize = this.GenBatchSize,
                         UseFlashAttention = this.UseFlashAttention,
                         IncludeMmproj = this.UseMmproj,
                         UseNoWarmup = this.NoWarmup
@@ -2395,7 +2790,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             if (this.Settings.AddGenerationParametesToSystemPrompt)
             {
-                string genParams = $"[Generation Parameters: Temperature={this.GenTemperature:F2}, MaxTokens={this.GenMaxTokens}, ContextSize={this.ContextSize}, TopP={this.GenTopP:F2}, RepetitionPenalty={this.GenRepetitionPenalty:F2}]";
+                string genParams = $"[Generation Parameters: Temperature={this.GenTemperature:F2}, MaxTokens={this.GenMaxTokens}, ContextSize={this.ContextSize}, BatchSize={this.GenBatchSize}, TopP={this.GenTopP:F2}, TopK={this.GenTopK}, RepetitionPenalty={this.GenRepetitionPenalty:F2}]";
                 baseSystemPrompt = string.IsNullOrWhiteSpace(baseSystemPrompt)
                     ? genParams
                     : baseSystemPrompt.Trim() + "\n\n" + genParams;
@@ -2420,6 +2815,50 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
 
             return baseSystemPrompt.Trim() + "\n\n" + strictFormatInstruction;
+        }
+
+        private static string FormatSystemPromptForDisplay(string? value)
+        {
+            var sentences = ExtractSystemPromptSentences(value).ToArray();
+            return sentences.Length == 0
+                ? string.Empty
+                : string.Join(Environment.NewLine, sentences);
+        }
+
+        private static string NormalizeSystemPromptFromDisplay(string? value)
+        {
+            var sentences = ExtractSystemPromptSentences(value).ToArray();
+            return sentences.Length == 0
+                ? string.Empty
+                : string.Join(" ", sentences);
+        }
+
+        private static IEnumerable<string> ExtractSystemPromptSentences(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                yield break;
+            }
+
+            string normalized = value.Replace("\r\n", "\n").Replace('\r', '\n');
+            foreach (string line in normalized.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                foreach (Match match in Regex.Matches(line, @"[^.]+(?:\.|$)"))
+                {
+                    string sentence = Regex.Replace(match.Value, @"\s+", " ").Trim();
+                    if (string.IsNullOrWhiteSpace(sentence))
+                    {
+                        continue;
+                    }
+
+                    if (sentence[^1] != '.' && sentence[^1] != '!' && sentence[^1] != '?')
+                    {
+                        sentence += ".";
+                    }
+
+                    yield return sentence;
+                }
+            }
         }
 
         private string BuildDefaultSystemPromptFromSettings()
