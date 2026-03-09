@@ -17,18 +17,19 @@
 <div class="page-wrapper">
     <div class="top-panels-container">
         <div id="top-panels-content" class="top-panels-content">
-            <RadzenStack Gap="1rem" class="home-shell">
-            @if (!string.IsNullOrWhiteSpace(VM.LastActionMessage))
-            {
-                <RadzenAlert AlertStyle="@(VM.LastActionIsAllowedNonAdminCommand ? AlertStyle.Success : AlertStyle.Info)" Shade="Shade.Lighter" ShowIcon="true">@VM.LastActionMessage</RadzenAlert>
-            }
-
-
+            <RadzenStack Gap="1rem" class="home-shell top-panels-shell">
             <RadzenCard class="management-tabs-card">
-                <RadzenTabs @bind-SelectedIndex="_managementTabIndex" RenderMode="TabRenderMode.Client">
-                    <Tabs>
-                        <RadzenTabsItem Text="Model Management">
-                            <RadzenStack Gap="1rem" class="collapsible-inner">
+                <div class="management-tab-header">
+                    <button type="button" class="management-tab-button @(_managementTabIndex == 0 ? "active" : null)" @onclick="() => _managementTabIndex = 0">Model Management</button>
+                    <button type="button" class="management-tab-button @(_managementTabIndex == 1 ? "active" : null)" @onclick="() => _managementTabIndex = 1">Context Management</button>
+                    <button type="button" class="management-tab-button @(_managementTabIndex == 2 ? "active" : null)" @onclick="() => _managementTabIndex = 2">Knowledge Base</button>
+                    <button type="button" class="management-tab-button @(_managementTabIndex == 3 ? "active" : null)" @onclick="() => _managementTabIndex = 3">Speech-to-Text</button>
+                </div>
+
+                <div class="management-tab-body">
+                    @if (_managementTabIndex == 0)
+                    {
+                        <RadzenStack Gap="1rem" class="collapsible-inner">
                                 <div style="display:flex;gap:0.5rem;align-items:center;width:100%;">
                                     <div style="width:220px;display:flex;flex-direction:column;align-items:flex-start;">
                                         <div style="display:flex;align-items:center;gap:0.25rem;">
@@ -105,22 +106,11 @@
                                         @VM.LastLoadError
                                     </RadzenAlert>
                                 }
-
-                                @if (VM.LoadedModel != null)
-                                {
-                                    <RadzenAlert AlertStyle="AlertStyle.Success" Shade="Shade.Lighter" ShowIcon="true">
-                                        <strong>Loaded:</strong> @VM.LoadedModel.Name
-                                        @if (VM.UseMmproj && !string.IsNullOrEmpty(VM.LoadedModel.MmprojFilePath))
-                                        {
-                                            <text> — Multimodal projection active</text>
-                                        }
-                                    </RadzenAlert>
-                                }
-                            </RadzenStack>
-                        </RadzenTabsItem>
-
-                        <RadzenTabsItem Text="Context Management">
-                            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap" class="collapsible-inner">
+                        </RadzenStack>
+                    }
+                    else if (_managementTabIndex == 1)
+                    {
+                        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap" class="collapsible-inner">
                                 <RadzenFormField Text="Save Name" Variant="Variant.Outlined">
                                     <ChildContent>
                                         <RadzenTextBox @bind-Value="VM.ContextSaveName" Name="contextSaveName" Style="width:180px;" />
@@ -135,11 +125,11 @@
 
                                 <RadzenButton Text="Load" Icon="upload" ButtonStyle="ButtonStyle.Info" Disabled="@(string.IsNullOrWhiteSpace(VM.SelectedContextFilePath) || VM.IsGenerating)" Click="@VM.LoadSelectedContextAsync" />
                                 <RadzenButton Text="Delete" Icon="delete" ButtonStyle="ButtonStyle.Danger" Disabled="@(string.IsNullOrWhiteSpace(VM.SelectedContextFilePath) || VM.IsGenerating)" Click="@VM.DeleteSelectedContextAsync" />
-                            </RadzenStack>
-                        </RadzenTabsItem>
-
-                        <RadzenTabsItem Text="Knowledge Base">
-                            <RadzenStack Gap="0.6rem" class="collapsible-inner">
+                        </RadzenStack>
+                    }
+                    else if (_managementTabIndex == 2)
+                    {
+                        <RadzenStack Gap="0.6rem" class="collapsible-inner">
                                 @if (VM.IsKnowledgeBusy)
                                 {
                                     <div class="knowledge-busy-indicator" role="status" aria-live="polite">
@@ -289,10 +279,59 @@
                                         }
                                     </div>
                                 }
-                            </RadzenStack>
-                        </RadzenTabsItem>
-                    </Tabs>
-                </RadzenTabs>
+                        </RadzenStack>
+                    }
+                    else if (_managementTabIndex == 3)
+                    {
+                        <RadzenStack Gap="0.6rem" class="collapsible-inner">
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap">
+                                    <RadzenFormField Text="Whisper Model" Variant="Variant.Outlined" Style="flex:1;min-width:200px;">
+                                        <ChildContent>
+                                            <RadzenDropDown @bind-Value="VM.SelectedWhisperModelName"
+                                                            Data="@VM.WhisperModels"
+                                                            TextProperty="ModelName"
+                                                            ValueProperty="ModelName"
+                                                            AllowFiltering="true"
+                                                            FilterCaseSensitivity="FilterCaseSensitivity.CaseInsensitive"
+                                                            FilterOperator="StringFilterOperator.Contains"
+                                                            Placeholder="Select a whisper model…"
+                                                            Disabled="@(VM.IsWhisperLoaded || VM.IsBusy)"
+                                                            Style="width:100%;" />
+                                        </ChildContent>
+                                    </RadzenFormField>
+
+                                    @if (VM.IsWhisperLoaded)
+                                    {
+                                        <RadzenButton Text="Unload" Icon="eject" ButtonStyle="ButtonStyle.Danger" Click="VM.UnloadWhisperModel" Disabled="@(VM.IsBusy || VM.IsWhisperTranscribing || VM.IsWhisperLiveMode)" />
+                                    }
+                                    else
+                                    {
+                                        <RadzenButton Text="Load" Icon="download" ButtonStyle="ButtonStyle.Primary" Click="VM.LoadWhisperModelAsync" Disabled="@(VM.IsBusy || string.IsNullOrEmpty(VM.SelectedWhisperModelName))" />
+                                    }
+                                </RadzenStack>
+
+                                <div style="display:flex;flex-direction:column;gap:0.5rem;">
+                                    <RadzenText TextStyle="TextStyle.Caption" Text="Select and load a Whisper GGML model (.bin) to enable speech-to-text. Use the mic button below to record and transcribe." />
+
+                                    <div style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap;">
+                                        <RadzenFormField Text="Language" Variant="Variant.Outlined" Style="width:180px;">
+                                            <ChildContent>
+                                                <RadzenDropDown @bind-Value="VM.WhisperLanguage"
+                                                                Data="@(new string[]{ "auto","en","de","es","fr","it","pt","nl","ru","zh","ja","ko" })"
+                                                                Style="width:100%;" />
+                                            </ChildContent>
+                                        </RadzenFormField>
+
+                                        <RadzenCheckBox TValue="bool" @bind-Value="VM.WhisperTimestamps" />
+                                        <RadzenLabel Text="Timestamps" />
+
+                                        <RadzenCheckBox TValue="bool" @bind-Value="VM.WhisperSpeakers" />
+                                        <RadzenLabel Text="Speakers" />
+                                    </div>
+                                </div>
+                        </RadzenStack>
+                    }
+                </div>
             </RadzenCard>
 
             </RadzenStack>
@@ -503,7 +542,7 @@
 
                                 <RadzenFormField Text="Repetition Penalty" Variant="Variant.Outlined">
                                     <ChildContent>
-                                        <RadzenNumeric @bind-Value="VM.GenRepetitionPenalty" TValue="decimal" Min="0.1m" Max="10m" Step="0.05m" Style="width:140px;" />
+                                        <RadzenNumeric @bind-Value="VM.GenRepetitionPenalty" TValue="double" Min="0" Max="10" Step="0.05" Style="width:140px;" />
                                     </ChildContent>
                                 </RadzenFormField>
 
@@ -552,6 +591,22 @@
                 <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.6rem" Wrap="FlexWrap.Wrap">
                     <RadzenButton Text="Browse Images" Icon="image_search" ButtonStyle="ButtonStyle.Light" Click="VM.BrowseImagesClickAsync" Disabled="@VM.IsGenerating" />
                     <InputFile id="imagePicker" OnChange="VM.OnImagesSelectedAsync" multiple accept="image/*,.tif,.tiff" style="display:none;" />
+                    <InputFile id="audioFilePicker" OnChange="VM.OnAudioFilesSelectedAsync" accept=".mp3,.wav,.flac,.ogg,audio/*" style="display:none;" />
+
+                    <button id="micButton" type="button"
+                            class="mic-btn @(VM.IsMicRecording ? "recording" : "") @(VM.IsWhisperTranscribing ? "transcribing" : "")"
+                            style="@($"--mic-level:{VM.MicLevel:0.000};")"
+                            disabled="@(!VM.IsWhisperLoaded || VM.IsGenerating || VM.IsWhisperTranscribing)"
+                            title="@(VM.IsMicRecording ? "Recording... click or release to stop" : "Click or hold to record audio. Right-click to upload an audio file.")">
+                        <span class="mic-level-fill" aria-hidden="true"></span>
+                        <i class="rzi mic-btn-icon">@(VM.IsMicRecording ? "stop" : VM.IsWhisperTranscribing ? "hourglass_empty" : "mic")</i>
+                    </button>
+
+                    <RadzenButton Text="@(VM.IsWhisperLiveMode ? "Stop Live" : "Live")"
+                                  Icon="@(VM.IsWhisperLiveMode ? "hearing_disabled" : "hearing")"
+                                  ButtonStyle="@(VM.IsWhisperLiveMode ? ButtonStyle.Danger : ButtonStyle.Light)"
+                                  Click="VM.ToggleLiveModeAsync"
+                                  Disabled="@(!VM.IsWhisperLoaded || VM.IsGenerating || VM.IsMicRecording)" />
 
                     <RadzenButton Text="Generate" Icon="send" ButtonStyle="ButtonStyle.Primary" Disabled="@(!VM.CanSend || !VM.IsLoaded || VM.IsBusy)" Click="@VM.StartGenerationAsync" />
                     <RadzenButton Text="Cancel" Icon="stop" ButtonStyle="ButtonStyle.Warning" Disabled="@(!VM.IsGenerating)" Click="@VM.CancelGeneration" />
@@ -592,7 +647,7 @@
     {
         if (firstRender)
         {
-            VM.NotifyStateChanged = () => InvokeAsync(StateHasChanged);
+            VM.RegisterStateChangeListener(OnViewModelStateChanged);
             _vmRef = DotNetObjectReference.Create(VM);
             await VM.OnFirstRenderAsync(_vmRef);
             StateHasChanged();
@@ -607,7 +662,12 @@
 
     public void Dispose()
     {
-        VM.NotifyStateChanged = null;
+        VM.UnregisterStateChangeListener(OnViewModelStateChanged);
         _vmRef?.Dispose();
+    }
+
+    private void OnViewModelStateChanged()
+    {
+        _ = InvokeAsync(StateHasChanged);
     }
 }

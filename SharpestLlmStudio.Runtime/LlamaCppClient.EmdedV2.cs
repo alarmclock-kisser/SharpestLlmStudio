@@ -37,7 +37,7 @@ namespace SharpestLlmStudio.Runtime
             string baseKey = key.Trim();
             KnowledgeChunkingPlanV2 plan = ResolveChunkingPlanV2(content, chunkSize);
             await StaticLogger.LogAsync($"[LlamaCpp][RAGv2] Chunking for '{baseKey}': mode={(plan.IsAutoSelected ? "auto" : "manual")}, child={plan.ChildChunkSize}, parent={plan.ParentChunkSize}, contentLength={(content?.Length ?? 0)}, source='{sourcePath ?? "(inline)"}'");
-            var chunks = BuildKnowledgeChunksV2(baseKey, content, sourcePath, plan);
+            var chunks = BuildKnowledgeChunksV2(baseKey, content ?? string.Empty, sourcePath, plan);
             if (chunks.Count == 0)
             {
                 throw new InvalidOperationException("Knowledge source did not produce any chunks.");

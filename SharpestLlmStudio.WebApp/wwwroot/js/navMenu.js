@@ -54,6 +54,9 @@ window.sharpestNavMenu = {
     triggerClick: function (elementId) {
         const element = document.getElementById(elementId);
         if (element) {
+            if (element.tagName === 'INPUT' && element.type === 'file') {
+                element.value = '';
+            }
             element.click();
         }
     },
@@ -456,5 +459,150 @@ window.sharpestNavMenu = {
                 radzenLink.href = radzenLink.href.replace('material-dark-base.css', 'material-base.css');
             }
         }
+    },
+
+    hideMicButtonMenu: function () {
+        if (window._sharpestMicMenuOutsideHandler) {
+            document.removeEventListener('mousedown', window._sharpestMicMenuOutsideHandler, true);
+            document.removeEventListener('contextmenu', window._sharpestMicMenuOutsideHandler, true);
+            window._sharpestMicMenuOutsideHandler = null;
+        }
+
+        const existing = document.getElementById('sharpest-mic-context-menu');
+        if (existing) {
+            existing.remove();
+        }
+    },
+
+    showMicButtonMenu: function (clientX, clientY, uploadInputId) {
+        window.sharpestNavMenu.hideMicButtonMenu();
+
+        const menu = document.createElement('div');
+        menu.id = 'sharpest-mic-context-menu';
+        menu.style.position = 'fixed';
+        menu.style.left = `${clientX}px`;
+        menu.style.top = `${clientY}px`;
+        menu.style.zIndex = '10000';
+        menu.style.minWidth = '180px';
+        menu.style.padding = '6px';
+        menu.style.border = '1px solid rgba(0,0,0,0.14)';
+        menu.style.borderRadius = '8px';
+        menu.style.background = 'var(--rz-base-background-color, #fff)';
+        menu.style.boxShadow = '0 10px 24px rgba(0,0,0,0.18)';
+
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.textContent = 'Upload Audio File';
+        item.style.display = 'block';
+        item.style.width = '100%';
+        item.style.border = 'none';
+        item.style.background = 'transparent';
+        item.style.textAlign = 'left';
+        item.style.padding = '8px 10px';
+        item.style.borderRadius = '6px';
+        item.style.cursor = 'pointer';
+        item.style.color = 'inherit';
+        item.onmouseenter = () => item.style.background = 'rgba(25, 118, 210, 0.08)';
+        item.onmouseleave = () => item.style.background = 'transparent';
+        item.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            window.sharpestNavMenu.hideMicButtonMenu();
+            window.sharpestNavMenu.triggerClick(uploadInputId);
+        };
+
+        menu.appendChild(item);
+        document.body.appendChild(menu);
+
+        const rect = menu.getBoundingClientRect();
+        const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+        const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
+        menu.style.left = `${Math.min(clientX, maxLeft)}px`;
+        menu.style.top = `${Math.min(clientY, maxTop)}px`;
+
+        window._sharpestMicMenuOutsideHandler = (e) => {
+            if (!menu.contains(e.target)) {
+                window.sharpestNavMenu.hideMicButtonMenu();
+            }
+        };
+
+        setTimeout(() => {
+            document.addEventListener('mousedown', window._sharpestMicMenuOutsideHandler, true);
+            document.addEventListener('contextmenu', window._sharpestMicMenuOutsideHandler, true);
+        }, 0);
+    },
+
+    setupMicButton: function (elementId, dotNetRef, uploadInputId) {
+        const btn = document.getElementById(elementId);
+        if (!btn || btn._micBound) return;
+        btn._micBound = true;
+
+        let holdTimer = null;
+        let isHolding = false;
+
+        const onDown = (e) => {
+            if (e && typeof e.button === 'number' && e.button !== 0) return;
+            window.sharpestNavMenu.hideMicButtonMenu();
+            if (btn.disabled) return;
+            isHolding = false;
+            holdTimer = setTimeout(() => {
+                isHolding = true;
+                dotNetRef.invokeMethodAsync('OnMicHoldStart');
+            }, 350);
+        };
+
+        const onUp = (e) => {
+            if (e && typeof e.button === 'number' && e.button !== 0) return;
+            if (holdTimer) {
+                clearTimeout(holdTimer);
+                holdTimer = null;
+            }
+            if (btn.disabled) return;
+            if (isHolding) {
+                isHolding = false;
+                dotNetRef.invokeMethodAsync('OnMicHoldEnd');
+            } else {
+                dotNetRef.invokeMethodAsync('OnMicClick');
+            }
+        };
+
+        const onContextMenu = (e) => {
+            e.preventDefault();
+
+            if (holdTimer) {
+                clearTimeout(holdTimer);
+                holdTimer = null;
+            }
+
+            if (isHolding) {
+                isHolding = false;
+                dotNetRef.invokeMethodAsync('OnMicHoldEnd');
+            }
+
+            if (btn.classList.contains('recording')) return;
+            if (btn.disabled || !uploadInputId) return;
+            window.sharpestNavMenu.showMicButtonMenu(e.clientX, e.clientY, uploadInputId);
+        };
+
+        const onLeave = (e) => {
+            if (holdTimer) {
+                clearTimeout(holdTimer);
+                holdTimer = null;
+            }
+            if (isHolding) {
+                isHolding = false;
+                dotNetRef.invokeMethodAsync('OnMicHoldEnd');
+            }
+        };
+
+        btn.addEventListener('mousedown', onDown);
+        btn.addEventListener('mouseup', onUp);
+        btn.addEventListener('mouseleave', onLeave);
+        btn.addEventListener('contextmenu', onContextMenu);
+
+        // Touch support
+        btn.addEventListener('touchstart', (e) => { e.preventDefault(); onDown(e); }, { passive: false });
+        btn.addEventListener('touchend', (e) => { e.preventDefault(); onUp(e); });
+        btn.addEventListener('touchcancel', onLeave);
     }
 };

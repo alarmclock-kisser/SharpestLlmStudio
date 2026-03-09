@@ -337,7 +337,7 @@ namespace SharpestLlmStudio.Runtime
             string baseKey = key.Trim();
             int effectiveChunkSize = ResolveEffectiveLegacyChunkSize(chunkSize);
             await StaticLogger.LogAsync($"[LlamaCpp][Legacy] Chunking for '{baseKey}': chunkSize={effectiveChunkSize}, contentLength={(content?.Length ?? 0)}, source='{sourcePath ?? "(inline)"}'");
-            var chunks = SplitKnowledgeContent(content, effectiveChunkSize);
+            var chunks = SplitKnowledgeContent(content ?? string.Empty, effectiveChunkSize);
             var now = DateTime.UtcNow;
             var createdEntries = new List<LlamaKnowledgeEntry>(chunks.Count);
 

@@ -1,7 +1,10 @@
 ﻿@inherits LayoutComponentBase
 @using SharpestLlmStudio.Shared
+@using SharpestLlmStudio.WebApp.ViewModels
 @inject IJSRuntime JS
 @inject WebAppSettings Settings
+@inject HomeViewModel VM
+@implements IDisposable
 
 <div class="layout-shell @(isResizing ? "resizing" : string.Empty)"
      @onmousemove="HandleResizeMouseMove"
@@ -9,22 +12,37 @@
      @onmouseleave="StopResizing">
     <RadzenLayout>
         <RadzenHeader>
-            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem" class="rz-p-2">
-                <RadzenSidebarToggle Click="ToggleSidebar" />
-                <RadzenText TextStyle="TextStyle.H5" class="rz-mb-0" Text="SharpestLlmStudio" />
-                @if (!sidebarExpanded)
-                {
-                    <RadzenBadge Text="@($"({sidebarLogCount})")" BadgeStyle="BadgeStyle.Info" Variant="Variant.Flat" class="rz-ml-2" />
-                }
-                <div style="flex:1"></div>
-                <RadzenButton Icon="@ThemeIcon"
-                              Text="Theme"
-                              Size="ButtonSize.Small"
-                              Variant="Variant.Flat"
-                              ButtonStyle="ButtonStyle.Light"
-                              Click="ToggleDarkModeAsync"
-                              title="Dark Mode umschalten (On/Off)" />
-            </RadzenStack>
+            <div class="header-toolbar rz-p-2">
+                <div class="header-side header-side-left">
+                    <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.5rem">
+                        <RadzenSidebarToggle Click="ToggleSidebar" />
+                        @if (!sidebarExpanded)
+                        {
+                            <RadzenBadge Text="@($"({sidebarLogCount})")" BadgeStyle="BadgeStyle.Info" Variant="Variant.Flat" class="rz-ml-2" />
+                        }
+                    </RadzenStack>
+                </div>
+
+                <div class="header-center">
+                    <RadzenText TextStyle="TextStyle.H5" class="rz-mb-0 header-title" Text="SharpestLlmStudio" />
+                    @if (!string.IsNullOrWhiteSpace(VM.LastActionMessage))
+                    {
+                        <div class="header-action-message @VM.LastActionMessageCssClass" title="@VM.LastActionMessage">
+                            @VM.LastActionMessage
+                        </div>
+                    }
+                </div>
+
+                <div class="header-side header-side-right">
+                    <RadzenButton Icon="@ThemeIcon"
+                                  Text="Theme"
+                                  Size="ButtonSize.Small"
+                                  Variant="Variant.Flat"
+                                  ButtonStyle="ButtonStyle.Light"
+                                  Click="ToggleDarkModeAsync"
+                                  title="Toggle dark mode (On/Off)" />
+                </div>
+            </div>
         </RadzenHeader>
 
         <RadzenSidebar Expanded="@sidebarExpanded" Responsive="false" style="@($"width:{sidebarWidthPx}px;")" class="app-sidebar">
@@ -66,6 +84,11 @@
     int sidebarLogCount = 0;
     string darkModeSetting = "off";
     bool isDarkModeActive;
+
+    protected override void OnInitialized()
+    {
+        this.VM.RegisterStateChangeListener(OnViewModelStateChanged);
+    }
 
     private string DarkModeDisplayLabel => this.isDarkModeActive ? "On" : "Off";
 
@@ -183,5 +206,15 @@
 
         string mode = value.Trim().ToLowerInvariant();
         return mode is "on" or "off" or "auto" ? mode : "auto";
+    }
+
+    private void OnViewModelStateChanged()
+    {
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        this.VM.UnregisterStateChangeListener(OnViewModelStateChanged);
     }
 }

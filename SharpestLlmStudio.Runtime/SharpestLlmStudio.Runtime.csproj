@@ -7,12 +7,17 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.3" />
     <PackageReference Include="System.Drawing.Common" Version="10.0.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+    <PackageReference Include="Whisper.net" Version="1.9.0" />
+    <PackageReference Include="Whisper.net.Runtime.Cuda.Windows" Version="1.9.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\SharpestLlmStudio.Monitoring\SharpestLlmStudio.Monitoring.csproj" />
     <ProjectReference Include="..\SharpestLlmStudio.Shared\SharpestLlmStudio.Shared.csproj" />
+    <ProjectReference Include="..\SharpesLlmStudio.Media\SharpesLlmStudio.Media.csproj" />
   </ItemGroup>
 
-</Project>
+  </Project>

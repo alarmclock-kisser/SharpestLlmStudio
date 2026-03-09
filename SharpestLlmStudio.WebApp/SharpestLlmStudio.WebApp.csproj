@@ -15,6 +15,7 @@
     <ProjectReference Include="..\SharpestLlmStudio.Monitoring\SharpestLlmStudio.Monitoring.csproj" />
     <ProjectReference Include="..\SharpestLlmStudio.Runtime\SharpestLlmStudio.Runtime.csproj" />
     <ProjectReference Include="..\SharpestLlmStudio.Shared\SharpestLlmStudio.Shared.csproj" />
+    <ProjectReference Include="..\SharpesLlmStudio.Media\SharpesLlmStudio.Media.csproj" />
   </ItemGroup>
 
 </Project>

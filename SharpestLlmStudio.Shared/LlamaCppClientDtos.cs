@@ -22,7 +22,7 @@ namespace SharpestLlmStudio.Shared
         public bool PersistConversation { get; set; } = true;
         public bool IncludeConversationHistory { get; set; } = true;
 
-        public int MaxTokens { get; set; } = 1024;
+        public int MaxTokens { get; set; } = 1024; // 0 for no limit
         public double Temperature { get; set; } = 0.7;
         public double TopP { get; set; } = 0.9;
         public int TopK { get; set; } = 40;

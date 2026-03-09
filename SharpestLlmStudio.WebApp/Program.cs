@@ -1,5 +1,6 @@
 using Radzen;
 using SharpestLlmStudio.Runtime;
+using SharpestLlmStudio.Runtime.ONNX;
 using SharpestLlmStudio.Shared;
 using SharpestLlmStudio.WebApp.Components;
 using SharpestLlmStudio.WebApp.ViewModels;
@@ -42,6 +43,8 @@ namespace SharpestLlmStudio.WebApp
             builder.Services.AddSingleton(webAppSettings);
             builder.Services.AddSingleton<LlamaCppClient>(provider =>
                 new LlamaCppClient(webAppSettings, provider.GetService<GpuMonitor>()));
+            builder.Services.AddSingleton<OnnxWhisperService>(provider =>
+                new OnnxWhisperService(webAppSettings));
 
             // HTTPS-Umleitung und HSTS aktivieren
             builder.Services.AddHttpsRedirection(options =>

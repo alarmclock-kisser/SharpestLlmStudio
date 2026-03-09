@@ -7,6 +7,8 @@ using System.Text;
 using System.Diagnostics;
 using SharpestLlmStudio.Shared;
 using SharpestLlmStudio.Runtime;
+using SharpestLlmStudio.Runtime.ONNX;
+using SharpesLlmStudio.Media;
 using System.Runtime.Versioning;
 using System.Net;
 using System.Text.RegularExpressions;
@@ -15,13 +17,28 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 {
     public class HomeViewModel : IDisposable
     {
-        // Component can set this to allow the ViewModel to request UI re-render
-        public Action? NotifyStateChanged { get; set; }
+        private Action? stateChangedListeners;
         private readonly LlamaCppClient Client;
+        private readonly OnnxWhisperService Whisper;
         private readonly IJSRuntime Js;
         private readonly WebAppSettings Settings;
         private CancellationTokenSource? generationCts;
         private ElementReference messageContainerRef;
+
+        public void RegisterStateChangeListener(Action listener)
+        {
+            this.stateChangedListeners += listener;
+        }
+
+        public void UnregisterStateChangeListener(Action listener)
+        {
+            this.stateChangedListeners -= listener;
+        }
+
+        private void RaiseStateChanged()
+        {
+            try { this.stateChangedListeners?.Invoke(); } catch { }
+        }
 
 
         // API Data
@@ -50,7 +67,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
         }
 
-        private int modelSortIndex = 0;
+        private int modelSortIndex = 3;
         public int ModelSortIndex
         {
             get => this.modelSortIndex;
@@ -187,6 +204,22 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         }
         public IReadOnlyList<string> AvailableImageFormats { get; } = ["bmp", "png", "jpg"];
 
+        // ── Whisper / Speech-to-Text ──
+        public ICollection<OnnxWhisperModel> WhisperModels => this.Whisper.WhisperModels
+            .Where(m => m.ModelFilePath.EndsWith(".bin", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        public string? SelectedWhisperModelName { get; set; }
+        public bool IsWhisperLoaded => this.Whisper.IsLoaded;
+        public bool IsWhisperTranscribing => this.Whisper.IsTranscribing;
+        public bool IsWhisperLiveMode => this.Whisper.IsLiveMode;
+        public bool IsMicRecording { get; private set; }
+        public double MicLevel { get; private set; }
+        private Task<AudioObj?>? _activeRecordingTask;
+        // UI settings for transcription
+        public string WhisperLanguage { get; set; } = "auto"; // 'auto' means automatic detection
+        public bool WhisperTimestamps { get; set; } = false;
+        public bool WhisperSpeakers { get; set; } = false;
+
         // Generation UI state
         private string userInput = string.Empty;
         public string UserInput
@@ -195,15 +228,21 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             set
             {
                 this.userInput = value ?? string.Empty;
-                try
-                {
-                    this.NotifyStateChanged?.Invoke();
-                }
-                catch
-                {
-                    // ignore notify errors
-                }
+                this.RaiseStateChanged();
             }
+        }
+
+        private void UpdateMicLevel(float level)
+        {
+            double clamped = Math.Clamp(level, 0f, 1f);
+            this.MicLevel = Math.Max(clamped, this.MicLevel * 0.70);
+            this.RaiseStateChanged();
+        }
+
+        private void ResetMicLevel()
+        {
+            this.MicLevel = 0;
+            this.RaiseStateChanged();
         }
 
         public GenerationStats? LastGenerationStats { get; set; } = null;
@@ -262,7 +301,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             set
             {
                 this.autoRefreshEnabled = value;
-                try { this.NotifyStateChanged?.Invoke(); } catch { }
+                this.RaiseStateChanged();
                 if (value)
                 {
                     this.StartAutoRefresh();
@@ -281,7 +320,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             set
             {
                 this.autoRefreshIntervalMs = Math.Clamp(value, 100, 5000);
-                try { this.NotifyStateChanged?.Invoke(); } catch { }
+                this.RaiseStateChanged();
                 if (this.AutoRefreshEnabled)
                 {
                     this.StartAutoRefresh();
@@ -448,6 +487,43 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
         }
         public bool LastActionIsAllowedNonAdminCommand { get; private set; }
+        public string LastActionMessageCssClass
+        {
+            get
+            {
+                if (string.IsNullOrWhiteSpace(this.lastActionMessage))
+                {
+                    return "header-action-info";
+                }
+
+                if (this.LastActionIsAllowedNonAdminCommand)
+                {
+                    return "header-action-success";
+                }
+
+                string message = this.lastActionMessage;
+                if (message.Contains("failed", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("error", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("discarded", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("rejected", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "header-action-error";
+                }
+
+                if (message.Contains("loaded", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("complete", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("finished", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("saved", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("reused", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("started", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("stopped", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "header-action-success";
+                }
+
+                return "header-action-info";
+            }
+        }
         public bool MonitoringEnabled => this.Settings.EnableMonitoring;
         public bool HasSavedContextBaseline => !string.IsNullOrWhiteSpace(this.SelectedContextFilePath);
         public bool IsVolatileContext => !this.HasSavedContextBaseline;
@@ -459,7 +535,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             set
             {
                 this.isModelPanelExpanded = value;
-                try { this.NotifyStateChanged?.Invoke(); } catch { }
+                this.RaiseStateChanged();
             }
         }
 
@@ -470,7 +546,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             set
             {
                 this.isContextPanelExpanded = value;
-                try { this.NotifyStateChanged?.Invoke(); } catch { }
+                this.RaiseStateChanged();
             }
         }
 
@@ -481,7 +557,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             set
             {
                 this.isKnowledgePanelExpanded = value;
-                try { this.NotifyStateChanged?.Invoke(); } catch { }
+                this.RaiseStateChanged();
             }
         }
 
@@ -492,14 +568,14 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             set
             {
                 this.isStatsPanelExpanded = value;
-                try { this.NotifyStateChanged?.Invoke(); } catch { }
+                this.RaiseStateChanged();
             }
         }
 
         public float GenTemperature { get; set; } = 0.7f;
         public int GenMaxTokens { get; set; } = 512;
-        private decimal genRepetitionPenalty = 1.1m;
-        public decimal GenRepetitionPenalty
+        private double genRepetitionPenalty = 1.1;
+        public double GenRepetitionPenalty
         {
             get => this.genRepetitionPenalty;
             set
@@ -612,9 +688,10 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         private bool selectDefaultModelAfterReusedUnload;
 
 
-        public HomeViewModel(LlamaCppClient ApiClient, IJSRuntime js, WebAppSettings webAppSettings)
+        public HomeViewModel(LlamaCppClient ApiClient, IJSRuntime js, WebAppSettings webAppSettings, OnnxWhisperService whisperService)
         {
             this.Client = ApiClient;
+            this.Whisper = whisperService;
             this.Js = js;
             this.Settings = webAppSettings;
             this.AgentShowCommandWindow = this.Settings.AgentShowCommandWindow;
@@ -669,7 +746,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     {
                         await this.UpdateGenerationStatsAsync();
                         await this.UpdateHardwareStatsAsync();
-                        try { this.NotifyStateChanged?.Invoke(); } catch { }
+                        this.RaiseStateChanged();
                     }
                     catch { }
                 }, null, 0, Math.Max(100, this.AutoRefreshIntervalMs));
@@ -882,7 +959,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.ContextSaveName = string.Empty;
             this.LastGenerationStats = null;
             await this.RefreshContextAsync();
-            try { this.NotifyStateChanged?.Invoke(); } catch { }
+            this.RaiseStateChanged();
         }
 
         public void SetMessageContainer(ElementReference container)
@@ -896,7 +973,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             if (!this.IsImagePathsExpanded)
             {
-                try { this.NotifyStateChanged?.Invoke(); } catch { }
+                this.RaiseStateChanged();
                 return;
             }
 
@@ -911,7 +988,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 var selected = await this.Js.InvokeAsync<string[]?>("blazorHelpers.browseImagePaths", picturesPath, this.SelectedImagePaths);
                 if (selected == null || selected.Length == 0)
                 {
-                    try { this.NotifyStateChanged?.Invoke(); } catch { }
+                    this.RaiseStateChanged();
                     return;
                 }
 
@@ -931,7 +1008,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
             }
 
-            try { this.NotifyStateChanged?.Invoke(); } catch { }
+            this.RaiseStateChanged();
         }
 
         public async Task ScrollChatToBottomAsync()
@@ -983,7 +1060,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 this.IsImagePathsExpanded = true;
             }
 
-            try { this.NotifyStateChanged?.Invoke(); } catch { }
+            this.RaiseStateChanged();
         }
 
         public void RemoveImagePath(string path)
@@ -991,7 +1068,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.SelectedImagePaths.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
             this.loadedImageMetadata.Remove(path);
 
-            try { this.NotifyStateChanged?.Invoke(); } catch { }
+            this.RaiseStateChanged();
         }
 
         public async Task AddImageUploadsAsync(IEnumerable<IBrowserFile> files, CancellationToken cancellationToken = default)
@@ -1313,6 +1390,237 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             catch { }
         }
 
+
+        // ── Whisper / Speech-to-Text ──
+
+        public async Task LoadWhisperModelAsync()
+        {
+            if (string.IsNullOrEmpty(this.SelectedWhisperModelName)) return;
+            var model = this.Whisper.WhisperModels.FirstOrDefault(m => m.ModelName == this.SelectedWhisperModelName);
+            if (model == null) return;
+
+            this.IsBusy = true;
+            this.LastActionMessage = $"Loading Whisper model: {model.ModelName}...";
+            this.RequestUiRefresh();
+            try
+            {
+                var success = await this.Whisper.LoadModelAsync(model.ModelFilePath);
+                this.LastActionMessage = success
+                    ? $"Whisper model loaded: {model.ModelName}"
+                    : $"Failed to load Whisper model: {model.ModelName}";
+            }
+            catch (Exception ex)
+            {
+                this.LastActionMessage = $"Whisper load error: {ex.Message}";
+                await StaticLogger.LogAsync(ex, "[HomeViewModel] Whisper model load error");
+            }
+            finally
+            {
+                this.IsBusy = false;
+                this.RequestUiRefresh();
+            }
+        }
+
+        public void UnloadWhisperModel()
+        {
+            this.Whisper.UnloadModel();
+            this.ResetMicLevel();
+            this.LastActionMessage = "Whisper model unloaded.";
+            this.RequestUiRefresh();
+        }
+
+        private void AppendWhisperText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return;
+            }
+
+            string trimmed = text.Trim();
+            this.UserInput = string.IsNullOrWhiteSpace(this.UserInput)
+                ? trimmed
+                : this.UserInput.TrimEnd() + " " + trimmed;
+        }
+
+        private async Task StreamTranscriptionToUserInputAsync(IAsyncEnumerable<string> segments)
+        {
+            await foreach (var segment in segments)
+            {
+                this.AppendWhisperText(segment);
+                this.RequestUiRefresh();
+            }
+        }
+
+        [JSInvokable]
+        public async Task OnMicClick()
+        {
+            if (this.IsMicRecording)
+            {
+                await this.StopMicAndTranscribeAsync();
+            }
+            else
+            {
+                await this.StartMicRecordingAsync();
+            }
+        }
+
+        [JSInvokable]
+        public async Task OnMicHoldStart()
+        {
+            await this.StartMicRecordingAsync();
+        }
+
+        [JSInvokable]
+        public async Task OnMicHoldEnd()
+        {
+            await this.StopMicAndTranscribeAsync();
+        }
+
+        private async Task StartMicRecordingAsync()
+        {
+            if (this.IsMicRecording) return;
+            this.IsMicRecording = true;
+            this.ResetMicLevel();
+            this.RequestUiRefresh();
+
+            // Record at Whisper-native format (16 kHz, 16 bit, mono)
+            this._activeRecordingTask = this.Whisper.Audio.RecordAudioAsync(
+                sampleRate: OnnxWhisperService.WhisperSampleRate,
+                bitDepth: 16,
+                channels: OnnxWhisperService.WhisperChannels,
+                onLevel: this.UpdateMicLevel);
+        }
+
+        private async Task StopMicAndTranscribeAsync()
+        {
+            if (!this.IsMicRecording) return;
+
+            this.Whisper.Audio.StopRecording();
+            this.IsMicRecording = false;
+            this.ResetMicLevel();
+            this.RequestUiRefresh();
+
+            if (this._activeRecordingTask != null)
+            {
+                var audio = await this._activeRecordingTask;
+                this._activeRecordingTask = null;
+
+                if (audio != null && audio.Data.Length > 0 && this.Whisper.IsLoaded)
+                {
+                    this.LastActionMessage = "Transcribing audio...";
+                    this.RequestUiRefresh();
+                    try
+                    {
+                        string? lang = string.Equals(this.WhisperLanguage, "auto", StringComparison.OrdinalIgnoreCase) ? null : this.WhisperLanguage;
+                        await this.StreamTranscriptionToUserInputAsync(this.Whisper.TranscribeAsyncEnumerable(audio, lang, this.WhisperTimestamps, this.WhisperSpeakers));
+                        this.LastActionMessage = "Transcription complete.";
+                    }
+                    catch (Exception ex)
+                    {
+                        this.LastActionMessage = $"Transcription failed: {ex.Message}";
+                        await StaticLogger.LogAsync(ex, "[Whisper] Transcription error");
+                    }
+                }
+                else if (!this.Whisper.IsLoaded)
+                {
+                    this.LastActionMessage = "No Whisper model loaded. Recording discarded.";
+                }
+            }
+            this.RequestUiRefresh();
+        }
+
+        public async Task ToggleLiveModeAsync()
+        {
+            if (this.Whisper.IsLiveMode)
+            {
+                this.Whisper.StopLiveMode();
+                this.ResetMicLevel();
+                this.LastActionMessage = "Live transcription stopped.";
+                this.RequestUiRefresh();
+            }
+            else
+            {
+                if (!this.Whisper.IsLoaded)
+                {
+                    this.LastActionMessage = "Load a Whisper model first.";
+                    this.RequestUiRefresh();
+                    return;
+                }
+
+                this.LastActionMessage = "Starting live transcription...";
+                this.RequestUiRefresh();
+
+                string? lang = string.Equals(this.WhisperLanguage, "auto", StringComparison.OrdinalIgnoreCase) ? null : this.WhisperLanguage;
+                await this.Whisper.StartLiveModeAsync(text =>
+                {
+                    this.AppendWhisperText(text);
+                    this.RequestUiRefresh();
+                }, lang, this.WhisperTimestamps, this.WhisperSpeakers, this.UpdateMicLevel);
+            }
+        }
+
+        public async Task OnAudioFilesSelectedAsync(InputFileChangeEventArgs args)
+        {
+            var file = args.GetMultipleFiles(1).FirstOrDefault();
+            if (file == null)
+            {
+                return;
+            }
+
+            if (!this.Whisper.IsLoaded)
+            {
+                this.LastActionMessage = "Load a Whisper model first.";
+                this.RequestUiRefresh();
+                return;
+            }
+
+            string extension = Path.GetExtension(file.Name);
+            string tempDir = Path.Combine(Path.GetTempPath(), "SharpestLlmStudio", "audio-upload");
+            Directory.CreateDirectory(tempDir);
+            string tempPath = Path.Combine(tempDir, $"audio_{DateTime.UtcNow:yyyyMMdd_HHmmss_fff}_{Guid.NewGuid():N}{extension}");
+
+            this.IsBusy = true;
+            this.LastActionMessage = $"Uploading audio file: {file.Name}...";
+            this.RequestUiRefresh();
+
+            try
+            {
+                await using (var stream = file.OpenReadStream(512L * 1024L * 1024L))
+                await using (var fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    await stream.CopyToAsync(fs);
+                }
+
+                this.LastActionMessage = $"Transcribing audio file: {file.Name}...";
+                this.RequestUiRefresh();
+
+                string? lang = string.Equals(this.WhisperLanguage, "auto", StringComparison.OrdinalIgnoreCase) ? null : this.WhisperLanguage;
+                await this.StreamTranscriptionToUserInputAsync(this.Whisper.TranscribeFileAsyncEnumerable(tempPath, lang, this.WhisperTimestamps, this.WhisperSpeakers));
+                this.LastActionMessage = $"Audio transcription complete: {file.Name}";
+            }
+            catch (Exception ex)
+            {
+                this.LastActionMessage = $"Audio transcription failed: {ex.Message}";
+                await StaticLogger.LogAsync(ex, "[Whisper] Audio file transcription error");
+            }
+            finally
+            {
+                this.IsBusy = false;
+                try
+                {
+                    if (File.Exists(tempPath))
+                    {
+                        File.Delete(tempPath);
+                    }
+                }
+                catch
+                {
+                }
+
+                this.RequestUiRefresh();
+            }
+        }
+
         public async Task RefreshAsync()
         {
             this.LlamaModels = this.Client.Models.ToList();
@@ -1326,6 +1634,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             if (this.FirstRender)
             {
+                this.Whisper.GetWhisperModels();
+
                 // this.DirectMlDevices = await this.Client.GetDirectMlDevicesAsync();
                 this.ContextSize = this.Settings.DefaultContextSize;
 
@@ -1338,7 +1648,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 this.GenTemperature = (float) this.Settings.DefaultTemperature;
                 this.GenTopP = (float) this.Settings.DefaultTopP;
                 this.GenTopK = this.Settings.DefaultTopK;
-                this.GenRepetitionPenalty = (decimal)this.Settings.DefaultRepetitionPenalty;
+                this.GenRepetitionPenalty = this.Settings.DefaultRepetitionPenalty;
+                this.SelectedWhisperModelName = this.WhisperModels.FirstOrDefault()?.ModelName;
 
 
                 this.FirstRender = false;
@@ -2021,7 +2332,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         private void RequestUiRefresh()
         {
-            try { this.NotifyStateChanged?.Invoke(); } catch { }
+            this.RaiseStateChanged();
         }
 
         private void RefreshKnowledgeEntriesFromClient()
@@ -2273,6 +2584,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupScrollToBottomButton", ChatOutputElementId, "chat-scroll-bottom-button");
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupThinkBlocks", ChatOutputElementId);
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupVerticalResizeHandle", TopPanelsResizeHandleElementId, TopPanelsContentElementId, 140, 900);
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupMicButton", "micButton", vmRef, "audioFilePicker");
             if (this.AutoScrollEnabled)
             {
                 await this.Js.InvokeVoidAsync("sharpestNavMenu.scrollToBottom", ChatOutputElementId);
@@ -2287,6 +2599,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupConditionalAutoScroll", ChatOutputElementId, 0.1);
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupScrollToBottomButton", ChatOutputElementId, "chat-scroll-bottom-button");
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupThinkBlocks", ChatOutputElementId);
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupMicButton", "micButton", vmRef, "audioFilePicker");
 
             if (this._panelStateLoaded)
             {
@@ -2357,6 +2670,11 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public async Task BrowseKnowledgeFilesClickAsync()
         {
             await this.Js.InvokeVoidAsync("sharpestNavMenu.triggerClick", "knowledgeFilePicker");
+        }
+
+        public async Task BrowseAudioFilesClickAsync()
+        {
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.triggerClick", "audioFilePicker");
         }
 
         public async Task OnImagesSelectedAsync(InputFileChangeEventArgs args)
@@ -2657,6 +2975,14 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.knowledgeOperationCts?.Dispose();
             this.knowledgeOperationCts = null;
 
+            // Whisper: stop any active mic recording or live mode
+            if (this.IsMicRecording)
+            {
+                this.Whisper.Audio.StopRecording();
+                this.IsMicRecording = false;
+            }
+            this.Whisper.StopLiveMode();
+
             GC.SuppressFinalize(this);
         }
 
@@ -2777,6 +3103,10 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                         {
                             this.LastActionMessage = "An existing llama-server instance was already running and is now reused.";
                         }
+                        else
+                        {
+                            this.LastActionMessage = $"Model loaded: {this.LoadedModel?.Name ?? modelToLoad.Name}";
+                        }
 
                         this.ScheduleModelPanelAutoCollapse();
                     }
@@ -2845,6 +3175,14 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 baseSystemPrompt = string.IsNullOrWhiteSpace(baseSystemPrompt)
                     ? genParams
                     : baseSystemPrompt.Trim() + "\n\n" + genParams;
+            }
+
+            if (this.Settings.AddCurrentDateTimeToSystemPrompt)
+            {
+                string currentDateTime = $"[Current Date and Time: {DateTime.Now}]";
+                baseSystemPrompt = string.IsNullOrWhiteSpace(baseSystemPrompt)
+                    ? currentDateTime
+                    : baseSystemPrompt.Trim() + "\n\n" + currentDateTime;
             }
 
             if (!this.UseJsonOutputFormat || !this.HasJsonOutputFormat)

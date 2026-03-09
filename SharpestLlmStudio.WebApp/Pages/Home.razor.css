@@ -2,7 +2,8 @@
 .page-wrapper {
     display: flex;
     flex-direction: column;
-    height: calc(100vh - 120px);
+    height: 100%;
+    min-height: 0;
     overflow: hidden;
 }
 
@@ -11,15 +12,25 @@
     display: flex;
     flex-direction: column;
     min-height: 140px;
+    min-width: 0;
 }
 
 .top-panels-content {
+    flex: 0 0 auto;
     min-height: 100px;
     height:320px;
     max-height: 60vh;
-    overflow-y: auto;
+    overflow: hidden;
     overflow-x: hidden;
-    padding-bottom: 0.25rem;
+    padding-bottom: 0;
+    min-width: 0;
+}
+
+.top-panels-shell {
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
 }
 
 .top-panels-resize-handle {
@@ -69,6 +80,72 @@
     box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.06);
     max-height: 55vh;
     overflow-y: auto;
+}
+
+/* ── Mic Button ── */
+.mic-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+    width: 38px;
+    height: 38px;
+    min-width: 38px;
+    border: 2px solid var(--rz-base-400, #bdbdbd);
+    border-radius: 6px;
+    background: var(--rz-base-background-color, #fff);
+    color: var(--rz-text-color, #212121);
+    cursor: pointer;
+    font-size: 1.15rem;
+    padding: 0;
+    transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.mic-level-fill {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: calc(var(--mic-level, 0) * 100%);
+    background: linear-gradient(180deg, rgba(102, 187, 106, 0.28) 0%, rgba(255, 238, 88, 0.45) 60%, rgba(239, 83, 80, 0.72) 100%);
+    transition: height 0.08s linear;
+    pointer-events: none;
+}
+
+.mic-btn-icon {
+    position: relative;
+    z-index: 1;
+}
+
+.mic-btn:hover:not(:disabled) {
+    background: var(--rz-base-200, #f5f5f5);
+    border-color: var(--rz-primary, #1976d2);
+}
+
+.mic-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.mic-btn.recording {
+    background: rgba(244, 67, 54, 0.12);
+    border-color: #f44336;
+    color: #f44336;
+    animation: mic-pulse 1s ease-in-out infinite;
+}
+
+.mic-btn.transcribing {
+    border-color: var(--rz-info, #2196f3);
+    color: var(--rz-info, #2196f3);
+    animation: mic-pulse 0.6s ease-in-out infinite;
+}
+
+@keyframes mic-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(244, 67, 54, 0.30); }
+    50% { box-shadow: 0 0 0 6px rgba(244, 67, 54, 0); }
 }
 
 .chat-footer-section {
@@ -189,6 +266,54 @@
 
 .management-tabs-card {
     border: 1px solid var(--rz-base-300);
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.management-tab-header {
+    display: flex;
+    align-items: stretch;
+    gap: 0.2rem;
+    flex-wrap: wrap;
+    padding: 0.25rem 0.25rem 0;
+    border-bottom: 1px solid var(--rz-base-300);
+    background: var(--rz-base-background-color, #fff);
+    flex: 0 0 auto;
+}
+
+.management-tab-button {
+    border: none;
+    background: transparent;
+    color: var(--rz-text-secondary-color, #666);
+    padding: 0.6rem 0.9rem;
+    border-radius: 8px 8px 0 0;
+    cursor: pointer;
+    font: inherit;
+    font-weight: 600;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.management-tab-button:hover {
+    background: rgba(25, 118, 210, 0.08);
+    color: var(--rz-primary, #1976d2);
+}
+
+.management-tab-button.active {
+    background: rgba(25, 118, 210, 0.10);
+    color: var(--rz-primary, #1976d2);
+}
+
+.management-tab-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 0.75rem;
+    scrollbar-gutter: stable;
 }
 
 .collapse-btn {
@@ -386,10 +511,6 @@
     color: var(--rz-text-secondary-color, #666);
     user-select: none;
     list-style: none;
-}
-
-.chat-content ::deep .think-summary::-webkit-details-marker {
-    display: none;
 }
 
 .chat-content ::deep .think-summary::marker {

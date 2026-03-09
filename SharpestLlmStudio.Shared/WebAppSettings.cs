@@ -16,6 +16,7 @@ namespace SharpestLlmStudio.Shared
 
         public string ServerExecutablePath { get; set; } = "llama-server.exe";
         public string[] ModelDirectories { get; set; } = [];
+        public string[] WhisperModelDirectories { get; set; } = [];
 
         public bool KillExistingServerInstances { get; set; } = false;
         public int IdleShutdownMinutes { get; set; } = 15;
@@ -31,6 +32,7 @@ namespace SharpestLlmStudio.Shared
         public List<string> SystemPrompts { get; set; } = [];
 
         public bool AddGenerationParametesToSystemPrompt { get; set; } = false;
+        public bool AddCurrentDateTimeToSystemPrompt { get; set; } = true;
         // Image handling defaults for generation
         // Use 0 to disable downsizing (send full-size images). Default is 720.
         public int DefaultImageMaxDimension { get; set; } = 720;

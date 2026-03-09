@@ -61,18 +61,54 @@ namespace SharpestLlmStudio.Shared
                 return content;
             }
 
-            const string knowledgeMarker = "Nutze die folgenden Wissenskontexte für die Antwort";
-            const string userPromptMarker = "User Prompt:";
+            content = CollapseKnowledgePayloadsForDisplay(content);
+            return SummarizeToolPayloadForDisplay(content);
+        }
 
-            int kIdx = content.IndexOf(knowledgeMarker, StringComparison.OrdinalIgnoreCase);
-            int uIdx = content.IndexOf(userPromptMarker, StringComparison.OrdinalIgnoreCase);
+        private static string CollapseKnowledgePayloadsForDisplay(string content)
+        {
+            string updated = content;
+            updated = CollapsePromptSection(updated, "Evidence Pack (retrieved + reranked):", "User Question:", "Show evidence pack");
+            updated = CollapsePromptSection(updated, "Use the following knowledge context for your answer, if relevant:", "User Prompt:", "Show retrieved knowledge context");
+            updated = CollapsePromptSection(updated, "Nutze die folgenden Wissenskontexte für die Antwort", "User Prompt:", "Show retrieved knowledge context");
+            return updated;
+        }
 
-            if (kIdx >= 0 && uIdx >= 0)
+        private static string CollapsePromptSection(string content, string startMarker, string endMarker, string summaryText)
+        {
+            int startIndex = content.IndexOf(startMarker, StringComparison.OrdinalIgnoreCase);
+            if (startIndex < 0)
             {
-                content = content.Substring(uIdx + userPromptMarker.Length).TrimStart();
+                return content;
             }
 
-            return SummarizeToolPayloadForDisplay(content);
+            int endIndex = content.IndexOf(endMarker, startIndex, StringComparison.OrdinalIgnoreCase);
+            if (endIndex <= startIndex)
+            {
+                return content;
+            }
+
+            string before = content[..startIndex].TrimEnd();
+            string collapsedBlock = content[startIndex..endIndex].Trim();
+            string after = content[endIndex..].TrimStart();
+            string encodedBlock = WebUtility.HtmlEncode(collapsedBlock);
+
+            string details = $"<details class=\"tool-cmd-details tool-rag-details\"><summary>{WebUtility.HtmlEncode(summaryText)}</summary><pre class=\"tool-raw\"><code>{encodedBlock}</code></pre></details>";
+
+            var sb = new StringBuilder();
+            if (!string.IsNullOrWhiteSpace(before))
+            {
+                sb.AppendLine(before);
+            }
+
+            sb.AppendLine(details);
+
+            if (!string.IsNullOrWhiteSpace(after))
+            {
+                sb.Append(after);
+            }
+
+            return sb.ToString();
         }
 
         public static string RenderMarkdown(string text)
