@@ -178,11 +178,21 @@
                                 </RadzenStack>
 
                                 <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.75rem" Wrap="FlexWrap.Wrap">
+                                    <RadzenFormField Text="RAG Preset" Variant="Variant.Outlined">
+                                        <ChildContent>
+                                            <RadzenDropDown Data="HomeViewModel.KnowledgePresetModes"
+                                                            @bind-Value="VM.SelectedKnowledgePreset"
+                                                            TValue="HomeViewModel.KnowledgePresetMode"
+                                                            Style="width:140px;"
+                                                            Disabled="@VM.IsKnowledgeBusy" />
+                                        </ChildContent>
+                                    </RadzenFormField>
+
                                     <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.4rem">
                                         <RadzenCheckBox TValue="bool"
                                                         @bind-Value="VM.KnowledgeAutoChunkSize"
                                                         Name="knowledgeAutoChunkSize"
-                                                        Disabled="@(!VM.UseKnowledgeRagV2 || VM.IsKnowledgeBusy)" />
+                                                        Disabled="@VM.IsKnowledgeBusy" />
                                         <RadzenLabel Text="Auto Chunk Size" Component="knowledgeAutoChunkSize" />
                                     </RadzenStack>
 
@@ -194,7 +204,7 @@
                                                            Max="4096"
                                                            Step="128"
                                                            Style="width:130px;"
-                                                           Disabled="@(!VM.UseKnowledgeRagV2 || VM.KnowledgeAutoChunkSize || VM.IsKnowledgeBusy)" />
+                                                           Disabled="@(VM.KnowledgeAutoChunkSize || VM.IsKnowledgeBusy)" />
                                         </ChildContent>
                                     </RadzenFormField>
                                 </RadzenStack>

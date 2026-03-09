@@ -357,6 +357,12 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     this.knowledgeChunkSize = 1024;
                 }
 
+                // Switch preset to Custom when manually changing auto mode
+                if (this.selectedKnowledgePreset != KnowledgePresetMode.Custom)
+                {
+                    this.selectedKnowledgePreset = KnowledgePresetMode.Custom;
+                }
+
                 this.RequestUiRefresh();
             }
         }
@@ -370,10 +376,53 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 this.knowledgeChunkSize = value.HasValue
                     ? Math.Clamp(value.Value, 256, 4096)
                     : null;
+
+                // Switch preset to Custom when manually changing chunk size
+                if (this.selectedKnowledgePreset != KnowledgePresetMode.Custom)
+                {
+                    this.selectedKnowledgePreset = KnowledgePresetMode.Custom;
+                }
+
                 this.RequestUiRefresh();
             }
         }
-        public int? KnowledgeChunkSizeForRagV2 => this.UseKnowledgeRagV2 && !this.KnowledgeAutoChunkSize ? this.KnowledgeChunkSize : null;
+
+        public enum KnowledgePresetMode { Custom, Fast, Balanced, Precision }
+        public static IReadOnlyList<KnowledgePresetMode> KnowledgePresetModes { get; } = Enum.GetValues<KnowledgePresetMode>();
+        private KnowledgePresetMode selectedKnowledgePreset = KnowledgePresetMode.Balanced;
+        public KnowledgePresetMode SelectedKnowledgePreset
+        {
+            get => this.selectedKnowledgePreset;
+            set
+            {
+                this.selectedKnowledgePreset = value;
+                switch (value)
+                {
+                    case KnowledgePresetMode.Fast:
+                        this.knowledgeAutoChunkSize = false;
+                        this.knowledgeChunkSize = 2048;
+                        break;
+                    case KnowledgePresetMode.Balanced:
+                        this.knowledgeAutoChunkSize = true;
+                        this.knowledgeChunkSize = null;
+                        break;
+                    case KnowledgePresetMode.Precision:
+                        this.knowledgeAutoChunkSize = false;
+                        this.knowledgeChunkSize = 512;
+                        break;
+                    case KnowledgePresetMode.Custom:
+                    default:
+                        break;
+                }
+
+                this.RequestUiRefresh();
+            }
+        }
+
+        /// <summary>Effective chunk size for the active RAG mode (null = auto).</summary>
+        public int? KnowledgeChunkSizeForRagV2 => !this.KnowledgeAutoChunkSize ? this.KnowledgeChunkSize : null;
+        /// <summary>Effective chunk size for legacy RAG (null = batch-size-based auto).</summary>
+        public int? KnowledgeChunkSizeForLegacy => !this.KnowledgeAutoChunkSize ? this.KnowledgeChunkSize : null;
         public bool IsKnowledgeBusy { get; private set; }
         public string KnowledgeBusyMessage { get; private set; } = string.Empty;
         public int KnowledgeProgressPercent { get; private set; }
@@ -1629,7 +1678,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 int totalChunks = Math.Max(1, this.UseKnowledgeRagV2
                     ? this.Client.GetKnowledgeChunkCountV2(content, this.KnowledgeChunkSizeForRagV2)
-                    : this.Client.GetKnowledgeChunkCount(content));
+                    : this.Client.GetKnowledgeChunkCount(content, this.KnowledgeChunkSizeForLegacy));
                 int completedChunks = 0;
                 this.UpdateKnowledgeProgress(0, totalChunks, key);
 
@@ -1656,7 +1705,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                         {
                             int done = System.Threading.Interlocked.Increment(ref completedChunks);
                             this.UpdateKnowledgeProgress(done, totalChunks, currentItem);
-                        });
+                        },
+                        chunkSize: this.KnowledgeChunkSizeForLegacy);
                 }
 
                 this.UpdateKnowledgeProgress(totalChunks, totalChunks, key);
@@ -1695,7 +1745,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                         string key = Path.GetFileName(file.Name);
                         int chunkCount = this.UseKnowledgeRagV2
                             ? Math.Max(1, this.Client.GetKnowledgeChunkCountV2(content, this.KnowledgeChunkSizeForRagV2))
-                            : Math.Max(1, this.Client.GetKnowledgeChunkCount(content));
+                            : Math.Max(1, this.Client.GetKnowledgeChunkCount(content, this.KnowledgeChunkSizeForLegacy));
                         workItems.Add(new KnowledgeImportWorkItem(key, content, file.Name, chunkCount));
                     }
                     catch (Exception ex)
@@ -1752,7 +1802,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                                 {
                                     int done = System.Threading.Interlocked.Increment(ref completedChunks);
                                     this.UpdateKnowledgeProgress(done, totalChunks, currentItem);
-                                });
+                                },
+                                this.KnowledgeChunkSizeForLegacy);
                         }
 
                         System.Threading.Interlocked.Increment(ref added);

@@ -20,14 +20,17 @@ namespace SharpestLlmStudio.Runtime
 
             using var activityScope = this.BeginServerActivityScope();
 
-            // Chunk large content to avoid exceeding the model's context window
-            const int MaxChunkChars = 2000;
-            if (content.Length <= MaxChunkChars)
+            // Derive chunk size from the server's batch size to avoid retry overhead
+            int effectiveBatchSize = Math.Max(64, this.CurrentBatchSize > 0 ? this.CurrentBatchSize : this._settings.DefaultBatchSize);
+            const int charsPerToken = 3;
+            int maxChunkChars = Math.Max(256, (effectiveBatchSize - 16) * charsPerToken);
+
+            if (content.Length <= maxChunkChars)
             {
                 return await this.CreateSingleEmbeddingAsync(content, cancellationToken, suppressLogging: false);
             }
 
-            var chunks = ChunkText(content, MaxChunkChars);
+            var chunks = ChunkText(content, maxChunkChars);
             float[]? accumulated = null;
             int chunkCount = 0;
 
@@ -306,12 +309,25 @@ namespace SharpestLlmStudio.Runtime
             return this.CreateEmbeddingAsync(xml.ToString(SaveOptions.DisableFormatting), cancellationToken);
         }
 
-        public int GetKnowledgeChunkCount(string content)
+        public int GetKnowledgeChunkCount(string content, int? chunkSize = null)
         {
-            return SplitKnowledgeContent(content, 1400).Count;
+            int effectiveChunkSize = ResolveEffectiveLegacyChunkSize(chunkSize);
+            return SplitKnowledgeContent(content, effectiveChunkSize).Count;
         }
 
-        public async Task<LlamaKnowledgeEntry> UpsertKnowledgeAsync(string key, string content, string? sourcePath = null, CancellationToken cancellationToken = default, Action<string>? progressCallback = null)
+        private int ResolveEffectiveLegacyChunkSize(int? requested)
+        {
+            if (requested.HasValue)
+            {
+                return Math.Clamp(requested.Value, 256, 4096);
+            }
+
+            int effectiveBatchSize = Math.Max(64, this.CurrentBatchSize > 0 ? this.CurrentBatchSize : this._settings.DefaultBatchSize);
+            const int charsPerToken = 3;
+            return Math.Clamp((effectiveBatchSize - 16) * charsPerToken, 400, 4096);
+        }
+
+        public async Task<LlamaKnowledgeEntry> UpsertKnowledgeAsync(string key, string content, string? sourcePath = null, CancellationToken cancellationToken = default, Action<string>? progressCallback = null, int? chunkSize = null)
         {
             if (string.IsNullOrWhiteSpace(key))
             {
@@ -319,7 +335,9 @@ namespace SharpestLlmStudio.Runtime
             }
 
             string baseKey = key.Trim();
-            var chunks = SplitKnowledgeContent(content, 1400);
+            int effectiveChunkSize = ResolveEffectiveLegacyChunkSize(chunkSize);
+            await StaticLogger.LogAsync($"[LlamaCpp][Legacy] Chunking for '{baseKey}': chunkSize={effectiveChunkSize}, contentLength={(content?.Length ?? 0)}, source='{sourcePath ?? "(inline)"}'");
+            var chunks = SplitKnowledgeContent(content, effectiveChunkSize);
             var now = DateTime.UtcNow;
             var createdEntries = new List<LlamaKnowledgeEntry>(chunks.Count);
 
@@ -444,7 +462,7 @@ namespace SharpestLlmStudio.Runtime
             int availablePromptTokens = Math.Max(256, ctxTokens - reservedForGeneration - 96);
             int availablePromptChars = availablePromptTokens * 3;
 
-            const string introLine = "Nutze die folgenden Wissenskontexte für die Antwort, falls relevant:";
+            const string introLine = "Use the following knowledge context for your answer, if relevant:";
             const string userPromptHeader = "User Prompt:";
 
             int baseCharsNeeded = introLine.Length + userPromptHeader.Length + userPrompt.Length + 16;
