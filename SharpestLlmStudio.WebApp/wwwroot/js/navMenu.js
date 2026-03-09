@@ -159,6 +159,37 @@ window.sharpestNavMenu = {
         setTimeout(update, 150);
     },
 
+    setupThinkBlocks: function (scrollerId) {
+        const scroller = document.getElementById(scrollerId);
+        if (!scroller) return;
+
+        const preferredOpen = window._sharpestThinkBlocksExpanded === true;
+        const detailsList = scroller.querySelectorAll('details.think-block');
+
+        detailsList.forEach((detail) => {
+            if (!detail._sharpestThinkBound) {
+                detail.addEventListener('toggle', () => {
+                    window._sharpestThinkBlocksExpanded = detail.open;
+
+                    if (detail.open && scroller._stickToBottom !== false) {
+                        scroller._programmaticScroll = true;
+                        requestAnimationFrame(() => {
+                            scroller.scrollTop = scroller.scrollHeight;
+                            scroller._programmaticScroll = false;
+                        });
+                    }
+                });
+
+                detail._sharpestThinkBound = true;
+            }
+
+            if (detail.dataset.thinkInit !== '1') {
+                detail.open = preferredOpen;
+                detail.dataset.thinkInit = '1';
+            }
+        });
+    },
+
     bindFooterOffset: function (scrollerId, footerId, minOffsetPx) {
         const scroller = document.getElementById(scrollerId);
         const footer = document.getElementById(footerId);

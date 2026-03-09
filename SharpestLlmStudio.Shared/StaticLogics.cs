@@ -11,11 +11,14 @@ namespace SharpestLlmStudio.Shared
     {
         // Static Fields
         public static int SparklineHistoryMax = 60;
-        private static readonly (string Open, string Close)[] ThinkTagPairs =
-        [
-            ("<think>", "</think>"),
-            ("◁think▷", "◁/think▷")
-        ];
+        private static readonly Regex ThinkOpenTagRegex = new(
+            @"(<\s*think\s*>|◁\s*think\s*▷|〈\s*think\s*〉|《\s*think\s*》|＜\s*think\s*＞|⟨\s*think\s*⟩)",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex ThinkCloseTagRegex = new(
+            @"(<\s*/\s*think\s*>|◁\s*/\s*think\s*▷|〈\s*/\s*think\s*〉|《\s*/\s*think\s*》|＜\s*/\s*think\s*＞|⟨\s*/\s*think\s*⟩)",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex OrderedListRegex = new(@"^\s*\d+[\.)]\s+(.*)$", RegexOptions.Compiled);
+        private static readonly Regex UnorderedListRegex = new(@"^\s*[-*•]\s+(.*)$", RegexOptions.Compiled);
 
 
 
@@ -82,7 +85,7 @@ namespace SharpestLlmStudio.Shared
             var lines = text.Split('\n');
             var sb = new StringBuilder();
             bool inCodeBlock = false;
-            bool inList = false;
+            string? currentListTag = null;
 
             foreach (var rawLine in lines)
             {
@@ -90,7 +93,7 @@ namespace SharpestLlmStudio.Shared
 
                 if (line.TrimStart().StartsWith("```"))
                 {
-                    if (inList) { sb.Append("</ul>"); inList = false; }
+                    CloseCurrentList(sb, ref currentListTag);
                     if (inCodeBlock)
                     {
                         sb.Append("</code></pre>");
@@ -111,61 +114,63 @@ namespace SharpestLlmStudio.Shared
                 }
 
                 if (line.StartsWith("<details class=\"tool-", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("<details class=\"think-block\"", StringComparison.OrdinalIgnoreCase)
                     || line.StartsWith("</details>", StringComparison.OrdinalIgnoreCase)
                     || line.StartsWith("<summary>", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("<summary class=\"think-summary\"", StringComparison.OrdinalIgnoreCase)
                     || line.StartsWith("</summary>", StringComparison.OrdinalIgnoreCase)
                     || line.StartsWith("<pre class=\"tool-", StringComparison.OrdinalIgnoreCase)
                     || line.StartsWith("</pre>", StringComparison.OrdinalIgnoreCase)
                     || line.StartsWith("<code>", StringComparison.OrdinalIgnoreCase)
                     || line.StartsWith("</code>", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (inList) { sb.Append("</ul>"); inList = false; }
+                    CloseCurrentList(sb, ref currentListTag);
                     sb.Append(line);
                     continue;
                 }
 
                 if (line.StartsWith("#### "))
                 {
-                    if (inList) { sb.Append("</ul>"); inList = false; }
+                    CloseCurrentList(sb, ref currentListTag);
                     sb.Append("<h6 class=\"md-h\">").Append(InlineMarkdown(line[5..])).Append("</h6>");
                     continue;
                 }
                 if (line.StartsWith("### "))
                 {
-                    if (inList) { sb.Append("</ul>"); inList = false; }
+                    CloseCurrentList(sb, ref currentListTag);
                     sb.Append("<h5 class=\"md-h\">").Append(InlineMarkdown(line[4..])).Append("</h5>");
                     continue;
                 }
                 if (line.StartsWith("## "))
                 {
-                    if (inList) { sb.Append("</ul>"); inList = false; }
+                    CloseCurrentList(sb, ref currentListTag);
                     sb.Append("<h4 class=\"md-h\">").Append(InlineMarkdown(line[3..])).Append("</h4>");
                     continue;
                 }
                 if (line.StartsWith("# "))
                 {
-                    if (inList) { sb.Append("</ul>"); inList = false; }
+                    CloseCurrentList(sb, ref currentListTag);
                     sb.Append("<h4 class=\"md-h\">").Append(InlineMarkdown(line[2..])).Append("</h4>");
                     continue;
                 }
 
-                if (line.TrimStart().StartsWith("- ") || line.TrimStart().StartsWith("* "))
+                var unorderedMatch = UnorderedListRegex.Match(line);
+                if (unorderedMatch.Success)
                 {
-                    if (!inList) { sb.Append("<ul class=\"md-list\">"); inList = true; }
-                    var itemText = line.TrimStart()[2..];
-                    sb.Append("<li>").Append(InlineMarkdown(itemText)).Append("</li>");
+                    EnsureList(sb, ref currentListTag, "ul");
+                    sb.Append("<li>").Append(InlineMarkdown(unorderedMatch.Groups[1].Value)).Append("</li>");
                     continue;
                 }
 
-                if (Regex.IsMatch(line.TrimStart(), @"^\d+\.\s"))
+                var orderedMatch = OrderedListRegex.Match(line);
+                if (orderedMatch.Success)
                 {
-                    if (!inList) { sb.Append("<ol class=\"md-list\">"); inList = true; }
-                    var match = Regex.Match(line.TrimStart(), @"^\d+\.\s(.*)");
-                    sb.Append("<li>").Append(InlineMarkdown(match.Groups[1].Value)).Append("</li>");
+                    EnsureList(sb, ref currentListTag, "ol");
+                    sb.Append("<li>").Append(InlineMarkdown(orderedMatch.Groups[1].Value)).Append("</li>");
                     continue;
                 }
 
-                if (inList) { sb.Append("</ul>"); inList = false; }
+                CloseCurrentList(sb, ref currentListTag);
 
                 if (string.IsNullOrWhiteSpace(line))
                 {
@@ -176,10 +181,7 @@ namespace SharpestLlmStudio.Shared
                 sb.Append("<p class=\"md-p\">").Append(InlineMarkdown(line)).Append("</p>");
             }
 
-            if (inList)
-            {
-                sb.Append("</ul>");
-            }
+            CloseCurrentList(sb, ref currentListTag);
 
             if (inCodeBlock)
             {
@@ -240,27 +242,30 @@ namespace SharpestLlmStudio.Shared
 
             while (pos < text.Length)
             {
-                if (!TryFindNextThinkOpenTag(text, pos, out int thinkStart, out string openTag, out string closeTag))
+                var openMatch = ThinkOpenTagRegex.Match(text, pos);
+                if (!openMatch.Success)
                 {
                     sb.Append(RenderMarkdown(text[pos..]));
                     break;
                 }
+
+                int thinkStart = openMatch.Index;
 
                 if (thinkStart > pos)
                 {
                     sb.Append(RenderMarkdown(text[pos..thinkStart]));
                 }
 
-                int contentStart = thinkStart + openTag.Length;
-                int thinkEnd = text.IndexOf(closeTag, contentStart, StringComparison.OrdinalIgnoreCase);
+                int contentStart = openMatch.Index + openMatch.Length;
+                var closeMatch = ThinkCloseTagRegex.Match(text, contentStart);
 
                 string thinkContent;
                 bool isComplete;
 
-                if (thinkEnd >= 0)
+                if (closeMatch.Success)
                 {
-                    thinkContent = text[contentStart..thinkEnd].Trim();
-                    pos = thinkEnd + closeTag.Length;
+                    thinkContent = text[contentStart..closeMatch.Index].Trim();
+                    pos = closeMatch.Index + closeMatch.Length;
                     isComplete = true;
                 }
                 else
@@ -287,7 +292,7 @@ namespace SharpestLlmStudio.Shared
                     ? statusLabel
                     : WebUtility.HtmlEncode(lastLine.Length > 120 ? lastLine[..120] + "\u2026" : lastLine);
 
-                sb.Append($"<details class=\"think-block\"{(isComplete ? "" : " open")}>");
+                sb.Append($"<details class=\"think-block\" data-think-complete=\"{(isComplete ? "true" : "false")}\">");
                 sb.Append($"<summary class=\"think-summary\"><span class=\"think-label\">\U0001f4ad {statusLabel}</span><span class=\"think-preview\">{preview}</span></summary>");
                 sb.Append("<div class=\"think-content\">");
                 sb.Append(RenderMarkdown(thinkContent));
@@ -299,40 +304,30 @@ namespace SharpestLlmStudio.Shared
 
         private static bool ContainsThinkOpenTag(string text)
         {
-            foreach (var pair in ThinkTagPairs)
-            {
-                if (text.Contains(pair.Open, StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-            }
-
-            return false;
+            return ThinkOpenTagRegex.IsMatch(text);
         }
 
-        private static bool TryFindNextThinkOpenTag(string text, int startIndex, out int index, out string openTag, out string closeTag)
+        private static void EnsureList(StringBuilder sb, ref string? currentListTag, string targetListTag)
         {
-            index = -1;
-            openTag = string.Empty;
-            closeTag = string.Empty;
-
-            foreach (var pair in ThinkTagPairs)
+            if (string.Equals(currentListTag, targetListTag, StringComparison.Ordinal))
             {
-                int candidate = text.IndexOf(pair.Open, startIndex, StringComparison.OrdinalIgnoreCase);
-                if (candidate < 0)
-                {
-                    continue;
-                }
-
-                if (index < 0 || candidate < index)
-                {
-                    index = candidate;
-                    openTag = pair.Open;
-                    closeTag = pair.Close;
-                }
+                return;
             }
 
-            return index >= 0;
+            CloseCurrentList(sb, ref currentListTag);
+            sb.Append($"<{targetListTag} class=\"md-list\">");
+            currentListTag = targetListTag;
+        }
+
+        private static void CloseCurrentList(StringBuilder sb, ref string? currentListTag)
+        {
+            if (string.IsNullOrEmpty(currentListTag))
+            {
+                return;
+            }
+
+            sb.Append($"</{currentListTag}>");
+            currentListTag = null;
         }
 
         public static string InlineMarkdown(string text)

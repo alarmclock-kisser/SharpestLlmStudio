@@ -220,12 +220,20 @@
 }
 
 .chat-content ::deep .md-list {
-    margin: 0.3rem 0 0.3rem 1.2rem;
-    padding: 0;
+    margin: 0.3rem 0;
+    padding-left: 1.4rem;
 }
 
 .chat-content ::deep .md-list li {
     margin: 0.1rem 0;
+}
+
+.chat-content ::deep ol.md-list {
+    list-style-type: decimal;
+}
+
+.chat-content ::deep ul.md-list {
+    list-style-type: disc;
 }
 
 .chat-content ::deep .md-code-block {
@@ -287,6 +295,10 @@
 }
 
 .chat-content ::deep .think-summary::-webkit-details-marker {
+    display: none;
+}
+
+.chat-content ::deep .think-summary::marker {
     display: none;
 }
 
