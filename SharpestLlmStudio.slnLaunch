@@ -4,8 +4,7 @@
     "Projects": [
       {
         "Path": "SharpestLlmStudio.WebApp\\SharpestLlmStudio.WebApp.csproj",
-        "Action": "Start",
-        "DebugTarget": "https"
+        "Action": "Start"
       }
     ]
   }

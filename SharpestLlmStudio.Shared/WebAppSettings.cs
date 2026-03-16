@@ -29,7 +29,9 @@ namespace SharpestLlmStudio.Shared
         public float DefaultTopP { get; set; } = 0.9f;
         public int DefaultTopK { get; set; } = 40;
         public double DefaultRepetitionPenalty { get; set; } = 1.1;
-        public List<string> SystemPrompts { get; set; } = [];
+        public List<string> SystemPrompts { get; set; } = new List<string>();
+        public List<string> VisionSystemPrompts { get; set; } = new List<string>();
+        public Dictionary<string, string[]> AgentSystemPrompts { get; set; } = new Dictionary<string, string[]>();
 
         public bool AddGenerationParametesToSystemPrompt { get; set; } = false;
         public bool AddCurrentDateTimeToSystemPrompt { get; set; } = true;

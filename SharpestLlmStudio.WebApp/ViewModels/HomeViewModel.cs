@@ -51,7 +51,21 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         // State Data
         public string? SelectedDirectMlDevice { get; set; }
         public int DirectMlDeviceIndex => this.DirectMlDevices != null && this.SelectedDirectMlDevice != null ? this.DirectMlDevices.ToList().IndexOf(this.SelectedDirectMlDevice) -1 : -1;
-        public string? SelectedModelName { get; set; } = null;
+        private string? selectedModelName = null;
+        public string? SelectedModelName
+        {
+            get => this.selectedModelName;
+            set
+            {
+                if (string.Equals(this.selectedModelName, value, StringComparison.Ordinal)) return;
+                this.selectedModelName = value;
+                // Keep dependent state in sync and rebuild system prompt when model changes
+                this.OnSelectedModelChanged();
+                // Rebuild the system prompt to include/exclude Vision prompts based on mmproj availability
+                this.SystemPrompt = this.BuildDefaultSystemPromptFromSettings();
+                this.RequestUiRefresh();
+            }
+        }
 
         public static readonly IReadOnlyList<string> ModelSortOptions = ["A - Z", "Biggest", "Params", "Newest", "Vision"];
 
@@ -611,8 +625,35 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public bool ImageAttachmentsExpanded { get; set; } = true;
         public bool GenSettingsExpanded { get; set; } = false;
         public bool AutoScrollEnabled { get; set; } = true;
-        public bool EnableCommandAgentMode { get; set; } = true;
-        public bool EnableWebSearchAgentMode { get; set; } = true;
+
+        private bool enableCommandAgentMode = true;
+        public bool EnableCommandAgentMode
+        {
+            get => this.enableCommandAgentMode;
+            set
+            {
+                if (this.enableCommandAgentMode == value) return;
+                this.enableCommandAgentMode = value;
+                // rebuild stored SystemPrompt so agent prompts are added/removed immediately
+                this.SystemPrompt = this.BuildDefaultSystemPromptFromSettings();
+                this.RequestUiRefresh();
+            }
+        }
+
+        private bool enableWebSearchAgentMode = true;
+        public bool EnableWebSearchAgentMode
+        {
+            get => this.enableWebSearchAgentMode;
+            set
+            {
+                if (this.enableWebSearchAgentMode == value) return;
+                this.enableWebSearchAgentMode = value;
+                // rebuild stored SystemPrompt so agent prompts are added/removed immediately
+                this.SystemPrompt = this.BuildDefaultSystemPromptFromSettings();
+                this.RequestUiRefresh();
+            }
+        }
+
         public bool AutoAllowWebSearch { get; set; } = true;
         public bool AutoContinueAgentActions { get; set; } = false;
         public bool AllowAllNonAdminCommands { get; set; } = false;
@@ -3264,6 +3305,9 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     : baseSystemPrompt.Trim() + "\n\n" + toolInstructions;
             }
 
+            // No hot-word filtering here: agent prompts are controlled by BuildDefaultSystemPromptFromSettings
+            // via the AgentSystemPrompts dictionary and the UI toggles. Keep baseSystemPrompt as assembled.
+
             if (this.Settings.AddGenerationParametesToSystemPrompt)
             {
                 string genParams = $"[Generation Parameters: Temperature={this.GenTemperature:F2}, MaxTokens={this.GenMaxTokens}, ContextSize={this.ContextSize}, BatchSize={this.GenBatchSize}, TopP={this.GenTopP:F2}, TopK={this.GenTopK}, RepetitionPenalty={this.GenRepetitionPenalty:F2}]";
@@ -3350,14 +3394,42 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             var configured = this.Settings.SystemPrompts?
                 .Where(s => !string.IsNullOrWhiteSpace(s))
                 .Select(EnsureSentenceEndsWithPunctuation)
-                .ToList() ?? [];
+                .ToList() ?? new List<string>();
 
-            if (configured.Count > 0)
+            // Start with the general system prompts (non-agent-specific) from settings.
+            var resultList = new List<string>(configured);
+
+            // Append agent-specific prompts only when the corresponding agent toggles are enabled.
+            if (this.Settings.AgentSystemPrompts != null)
             {
-                return string.Join(" ", configured);
+                foreach (var kv in this.Settings.AgentSystemPrompts)
+                {
+                    var key = (kv.Key ?? string.Empty).Trim();
+                    var values = kv.Value ?? Array.Empty<string>();
+
+                    if (string.Equals(key, "WebSearch", StringComparison.OrdinalIgnoreCase) && this.EnableWebSearchAgentMode)
+                    {
+                        resultList.AddRange(values.Where(s => !string.IsNullOrWhiteSpace(s)).Select(EnsureSentenceEndsWithPunctuation));
+                        continue;
+                    }
+
+                    if (string.Equals(key, "Command", StringComparison.OrdinalIgnoreCase) && this.EnableCommandAgentMode)
+                    {
+                        resultList.AddRange(values.Where(s => !string.IsNullOrWhiteSpace(s)).Select(EnsureSentenceEndsWithPunctuation));
+                        continue;
+                    }
+                }
             }
 
-            return "You are a helpful, concise assistant.";
+            // Append Vision system prompts (top-level setting) when the selected model supports mmproj
+            if (this.HasMmproj && this.Settings.VisionSystemPrompts != null && this.Settings.VisionSystemPrompts.Count > 0)
+            {
+                resultList.AddRange(this.Settings.VisionSystemPrompts.Where(s => !string.IsNullOrWhiteSpace(s)).Select(EnsureSentenceEndsWithPunctuation));
+            }
+
+            return resultList.Count > 0
+                ? string.Join(" ", resultList)
+                : "You are a helpful, concise assistant.";
         }
 
         private string BuildToolInstructionPrompt()

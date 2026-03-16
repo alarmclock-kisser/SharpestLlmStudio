@@ -1,7 +1,0 @@
-<Solution>
-  <Project Path="SharpesLlmStudio.Media/SharpesLlmStudio.Media.csproj" Id="f4f9df0a-b503-4a4c-a4d3-648147646d43" />
-  <Project Path="SharpestLlmStudio.Monitoring/SharpestLlmStudio.Monitoring.csproj" />
-  <Project Path="SharpestLlmStudio.Runtime/SharpestLlmStudio.Runtime.csproj" />
-  <Project Path="SharpestLlmStudio.Shared/SharpestLlmStudio.Shared.csproj" />
-  <Project Path="SharpestLlmStudio.WebApp/SharpestLlmStudio.WebApp.csproj" />
-</Solution>
