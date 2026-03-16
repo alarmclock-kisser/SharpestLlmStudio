@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Forms;
+using System.Threading;
 using Microsoft.JSInterop;
 using Microsoft.AspNetCore.Components.Web;
 using System.IO;
@@ -336,6 +337,9 @@ namespace SharpestLlmStudio.WebApp.ViewModels
           
         public string GeneratedOutput { get; set; } = string.Empty;
         public bool IsGenerating { get; set; } = false;
+        // Indicates that an agent-invoked action (websearch/command) is currently running.
+        // This keeps the Cancel button enabled so the user can abort agent tool calls too.
+        public bool IsAgentActionRunning { get; set; } = false;
 
         public bool CanSend =>! this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput);
         public string SystemPrompt { get; set; } = string.Empty;
@@ -2592,50 +2596,77 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         // ── Lifecycle methods (called from Razor OnAfterRenderAsync) ──
 
-        public async Task OnFirstRenderAsync(DotNetObjectReference<HomeViewModel> vmRef)
+        public async Task OnFirstRenderAsync(DotNetObjectReference<HomeViewModel> vmRef, CancellationToken cancellationToken = default)
         {
+            if (cancellationToken.IsCancellationRequested) return;
+
             await this.InitializeAsync();
+            if (cancellationToken.IsCancellationRequested) return;
             await this.LoadPanelStatesAsync();
             this._panelStateLoaded = true;
             this._lastLoadedState = this.IsLoaded;
 
-            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupPromptEnter", "promptInput", vmRef);
-            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupClipboardImagePaste", "promptInput", vmRef);
-            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupConditionalAutoScroll", ChatOutputElementId, 0.1);
-            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupScrollToBottomButton", ChatOutputElementId, "chat-scroll-bottom-button");
-            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupThinkBlocks", ChatOutputElementId);
-            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupVerticalResizeHandle", TopPanelsResizeHandleElementId, TopPanelsContentElementId, 140, 900);
-            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupMicButton", "micButton", vmRef, "audioFilePicker");
-            if (this.AutoScrollEnabled)
+            try
             {
-                await this.Js.InvokeVoidAsync("sharpestNavMenu.scrollToBottom", ChatOutputElementId);
+                if (cancellationToken.IsCancellationRequested) return;
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.setupPromptEnter", "promptInput", vmRef);
+                if (cancellationToken.IsCancellationRequested) return;
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.setupClipboardImagePaste", "promptInput", vmRef);
+                if (cancellationToken.IsCancellationRequested) return;
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.setupConditionalAutoScroll", ChatOutputElementId, 0.1);
+                if (cancellationToken.IsCancellationRequested) return;
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.setupScrollToBottomButton", ChatOutputElementId, "chat-scroll-bottom-button");
+                if (cancellationToken.IsCancellationRequested) return;
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.setupThinkBlocks", ChatOutputElementId);
+                if (cancellationToken.IsCancellationRequested) return;
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.setupVerticalResizeHandle", TopPanelsResizeHandleElementId, TopPanelsContentElementId, 140, 900);
+                if (cancellationToken.IsCancellationRequested) return;
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.setupMicButton", "micButton", vmRef, "audioFilePicker");
+                if (this.AutoScrollEnabled)
+                {
+                    if (cancellationToken.IsCancellationRequested) return;
+                    await this.Js.InvokeVoidAsync("sharpestNavMenu.scrollToBottom", ChatOutputElementId);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex);
             }
             this._lastChatMessageCount = this.ChatMessages.Count;
         }
 
-        public async Task OnSubsequentRenderAsync(DotNetObjectReference<HomeViewModel> vmRef)
+        public async Task OnSubsequentRenderAsync(DotNetObjectReference<HomeViewModel> vmRef, CancellationToken cancellationToken = default)
         {
+            if (cancellationToken.IsCancellationRequested) return;
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupPromptEnter", "promptInput", vmRef);
+            if (cancellationToken.IsCancellationRequested) return;
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupClipboardImagePaste", "promptInput", vmRef);
+            if (cancellationToken.IsCancellationRequested) return;
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupConditionalAutoScroll", ChatOutputElementId, 0.1);
+            if (cancellationToken.IsCancellationRequested) return;
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupScrollToBottomButton", ChatOutputElementId, "chat-scroll-bottom-button");
+            if (cancellationToken.IsCancellationRequested) return;
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupThinkBlocks", ChatOutputElementId);
+            if (cancellationToken.IsCancellationRequested) return;
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupMicButton", "micButton", vmRef, "audioFilePicker");
 
             if (this._panelStateLoaded)
             {
+                if (cancellationToken.IsCancellationRequested) return;
                 await this.PersistPanelStatesAsync();
             }
 
             if (this._lastLoadedState != this.IsLoaded)
             {
                 this._lastLoadedState = this.IsLoaded;
+                if (cancellationToken.IsCancellationRequested) return;
                 await this.PersistPanelStatesAsync();
             }
 
             if (this.AutoScrollEnabled && (this.ChatMessages.Count != this._lastChatMessageCount || this.IsGenerating))
             {
                 this._lastChatMessageCount = this.ChatMessages.Count;
+                if (cancellationToken.IsCancellationRequested) return;
                 await this.Js.InvokeVoidAsync("sharpestNavMenu.autoScrollIfSticky", ChatOutputElementId);
             }
         }
@@ -2762,6 +2793,11 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 return;
             }
 
+            this.IsAgentActionRunning = true;
+            this.RequestUiRefresh();
+            try
+            {
+
             var request = this.PendingCommandRequest;
             var safety = this.PendingCommandSafety ?? this.Client.EvaluateCommandSafety(request.Command);
 
@@ -2779,7 +2815,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.RequestUiRefresh();
 
             bool allowElevated = safety.RequiresAdditionalConfirmation;
-            var result = await this.Client.ExecuteCommandAsync(request, allowElevated: allowElevated, timeout: TimeSpan.FromSeconds(30));
+            var result = await this.Client.ExecuteCommandAsync(request, allowElevated: allowElevated, timeout: TimeSpan.FromSeconds(30), cancellationToken: this.generationCts?.Token ?? CancellationToken.None);
             string injection = this.Client.BuildCommandResultInjectionPrompt(result);
             this.UserInput = AppendPromptForAgent(this.UserInput, injection);
 
@@ -2793,6 +2829,12 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 await this.StartGenerationAsync();
             }
+            }
+            finally
+            {
+                this.IsAgentActionRunning = false;
+                this.RequestUiRefresh();
+            }
         }
 
         [SupportedOSPlatform("windows")]
@@ -2803,6 +2845,11 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 return;
             }
 
+            this.IsAgentActionRunning = true;
+            this.RequestUiRefresh();
+            try
+            {
+
             var request = this.PendingWebSearchRequest;
             this.PendingWebSearchRequest = null;
 
@@ -2811,7 +2858,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 : $"WebSearch auto-executed query: {request.Query}";
             this.RequestUiRefresh();
 
-            var result = await this.Client.ExecuteWebSearchAsync(request);
+            var result = await this.Client.ExecuteWebSearchAsync(request, this.generationCts?.Token ?? CancellationToken.None);
             string injection = this.Client.BuildWebSearchResultInjectionPrompt(result);
             this.UserInput = AppendPromptForAgent(this.UserInput, injection);
 
@@ -2823,6 +2870,12 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
             {
                 await this.StartGenerationAsync();
+            }
+            }
+            finally
+            {
+                this.IsAgentActionRunning = false;
+                this.RequestUiRefresh();
             }
         }
 
@@ -2867,18 +2920,28 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.LastActionMessage = $"Executing command ({safety.SafetyLevel}): {request.Command}";
             this.RequestUiRefresh();
 
-            var result = await this.Client.ExecuteCommandAsync(request, allowElevated, TimeSpan.FromSeconds(30));
-            string injection = this.Client.BuildCommandResultInjectionPrompt(result);
-            this.UserInput = AppendPromptForAgent(this.UserInput, injection);
-            this.LastActionMessage = result.Success
-                ? "Command executed. Result was appended to the prompt."
-                : $"Command failed/blocked: {result.ErrorMessage ?? "Unknown error"}";
-
+            this.IsAgentActionRunning = true;
             this.RequestUiRefresh();
-
-            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
+            try
             {
-                await this.StartGenerationAsync();
+                var result = await this.Client.ExecuteCommandAsync(request, allowElevated, TimeSpan.FromSeconds(30), this.generationCts?.Token ?? CancellationToken.None);
+                string injection = this.Client.BuildCommandResultInjectionPrompt(result);
+                this.UserInput = AppendPromptForAgent(this.UserInput, injection);
+                this.LastActionMessage = result.Success
+                    ? "Command executed. Result was appended to the prompt."
+                    : $"Command failed/blocked: {result.ErrorMessage ?? "Unknown error"}";
+
+                this.RequestUiRefresh();
+
+                if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
+                {
+                    await this.StartGenerationAsync();
+                }
+            }
+            finally
+            {
+                this.IsAgentActionRunning = false;
+                this.RequestUiRefresh();
             }
         }
 
@@ -2910,18 +2973,28 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 : $"Starting web search: {request.Query}";
             this.RequestUiRefresh();
 
-            var result = await this.Client.ExecuteWebSearchAsync(request);
-            string injection = this.Client.BuildWebSearchResultInjectionPrompt(result);
-            this.UserInput = AppendPromptForAgent(this.UserInput, injection);
-            this.LastActionMessage = result.Success
-                ? "Web search completed. Result was appended to the prompt."
-                : $"Web search failed: {result.ErrorMessage ?? "Unknown error"}";
-
+            this.IsAgentActionRunning = true;
             this.RequestUiRefresh();
-
-            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
+            try
             {
-                await this.StartGenerationAsync();
+                var result = await this.Client.ExecuteWebSearchAsync(request, this.generationCts?.Token ?? CancellationToken.None);
+                string injection = this.Client.BuildWebSearchResultInjectionPrompt(result);
+                this.UserInput = AppendPromptForAgent(this.UserInput, injection);
+                this.LastActionMessage = result.Success
+                    ? "Web search completed. Result was appended to the prompt."
+                    : $"Web search failed: {result.ErrorMessage ?? "Unknown error"}";
+
+                this.RequestUiRefresh();
+
+                if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
+                {
+                    await this.StartGenerationAsync();
+                }
+            }
+            finally
+            {
+                this.IsAgentActionRunning = false;
+                this.RequestUiRefresh();
             }
         }
 

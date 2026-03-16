@@ -1,4 +1,5 @@
-﻿@page "/"
+﻿@using System.Threading
+@page "/"
 @page "/home"
 @rendermode InteractiveServer
 
@@ -613,7 +614,7 @@
                                   Disabled="@(!VM.IsWhisperLoaded || VM.IsGenerating || VM.IsMicRecording)" />
 
                     <RadzenButton Text="Generate" Icon="send" ButtonStyle="ButtonStyle.Primary" Disabled="@(!VM.CanSend || !VM.IsLoaded || VM.IsBusy)" Click="@VM.StartGenerationAsync" />
-                    <RadzenButton Text="Cancel" Icon="stop" ButtonStyle="ButtonStyle.Warning" Disabled="@(!VM.IsGenerating)" Click="@VM.CancelGeneration" />
+                    <RadzenButton Text="Cancel" Icon="stop" ButtonStyle="ButtonStyle.Warning" Disabled="@(!(VM.IsGenerating || VM.IsAgentActionRunning))" Click="@VM.CancelGeneration" />
                     <RadzenButton Text="Reset" Icon="restart_alt" ButtonStyle="ButtonStyle.Light" Disabled="@(VM.IsGenerating)" Click="@VM.ResetConversationAsync" />
                 </RadzenStack>
 
@@ -646,6 +647,7 @@
 @code {
     private int _managementTabIndex;
     private DotNetObjectReference<HomeViewModel>? _vmRef;
+    private CancellationTokenSource? _renderCts;
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -666,6 +668,18 @@
 
     public void Dispose()
     {
+        // Cancel any in-flight VM render operations before disposing the DotNetObjectReference to avoid races
+        try
+        {
+            _renderCts?.Cancel();
+        }
+        catch { }
+        finally
+        {
+            _renderCts?.Dispose();
+            _renderCts = null;
+        }
+
         VM.UnregisterStateChangeListener(OnViewModelStateChanged);
         _vmRef?.Dispose();
     }

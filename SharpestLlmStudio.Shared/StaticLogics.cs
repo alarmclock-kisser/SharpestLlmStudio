@@ -96,16 +96,28 @@ namespace SharpestLlmStudio.Shared
             string details = $"<details class=\"tool-cmd-details tool-rag-details\"><summary>{WebUtility.HtmlEncode(summaryText)}</summary><pre class=\"tool-raw\"><code>{encodedBlock}</code></pre></details>";
 
             var sb = new StringBuilder();
-            if (!string.IsNullOrWhiteSpace(before))
+            // If there is no 'before' content (e.g. the evidence pack starts the message),
+            // show the user's question (the 'after' part) first and then the collapsible
+            // evidence/details block. This ensures the original user message appears above
+            // the evidence pack in the UI.
+            if (string.IsNullOrWhiteSpace(before) && !string.IsNullOrWhiteSpace(after))
             {
-                sb.AppendLine(before);
+                sb.AppendLine(after);
+                sb.AppendLine(details);
             }
-
-            sb.AppendLine(details);
-
-            if (!string.IsNullOrWhiteSpace(after))
+            else
             {
-                sb.Append(after);
+                if (!string.IsNullOrWhiteSpace(before))
+                {
+                    sb.AppendLine(before);
+                }
+
+                sb.AppendLine(details);
+
+                if (!string.IsNullOrWhiteSpace(after))
+                {
+                    sb.Append(after);
+                }
             }
 
             return sb.ToString();
