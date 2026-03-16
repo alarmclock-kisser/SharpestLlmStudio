@@ -30,15 +30,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.stateChangedListeners += listener;
         }
 
-        // A hidden trigger used to request a generation from the model without showing
-        // a visible user message in the UI. This is a zero-width space so it is non-empty
-        // for the generator but invisible in text rendering.
-        private const string HiddenUserTrigger = "\u200B";
 
-        // When a tool injects a system/result prompt and we want the model to immediately
-        // continue, store the injection here so StartGenerationAsync can include it as
-        // part of the system prompt for the next generation request.
-        private string? PendingSystemInjectionPrompt;
 
         public void UnregisterStateChangeListener(Action listener)
         {
@@ -1225,13 +1217,9 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         }
 
         [SupportedOSPlatform("windows")]
-        // Parameterless wrapper kept for UI bindings (Radzen Click expects a parameterless Task-returning method).
-        public Task StartGenerationAsync() => StartGenerationAsync(allowEmptyUserInput: false);
-
-        [SupportedOSPlatform("windows")]
-        public async Task StartGenerationAsync(bool allowEmptyUserInput = false)
+        public async Task StartGenerationAsync()
         {
-            if (this.IsGenerating || !this.IsLoaded || (!allowEmptyUserInput && string.IsNullOrWhiteSpace(this.UserInput)))
+            if (this.IsGenerating || !this.IsLoaded || string.IsNullOrWhiteSpace(this.UserInput))
             {
                 return;
             }
@@ -1264,20 +1252,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             if (!this.IsolatedGeneration)
             {
-                // If we are forcing generation with an empty user input (allowEmptyUserInput == true),
-                // we use a hidden trigger as the actual prompt content so the server will accept
-                // it as non-empty, but we do NOT add that hidden trigger to the UI ChatMessages.
-                bool usingHiddenTrigger = string.IsNullOrWhiteSpace(prompt) && allowEmptyUserInput;
-                if (usingHiddenTrigger)
-                {
-                    // Use invisible trigger for the generation call
-                    prompt = HiddenUserTrigger;
-                    // Do not add to ChatMessages to avoid showing an empty/trigger message in UI
-                }
-                else
-                {
-                    this.ChatMessages.Add(new LlamaChatMessage { Role = "user", Content = prompt, CreatedAtUtc = DateTime.UtcNow });
-                }
+                this.ChatMessages.Add(new LlamaChatMessage { Role = "user", Content = prompt, CreatedAtUtc = DateTime.UtcNow });
             }
 
             var assistantMessage = new LlamaChatMessage { Role = "assistant", Content = string.Empty, CreatedAtUtc = DateTime.UtcNow };
@@ -2358,11 +2333,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         private void SyncChatMessagesFromClient()
         {
-            // Pull conversation from client but filter out hidden trigger messages used to
-            // silently prompt the model after tool results.
-            this.ChatMessages = this.Client.GetConversationSnapshot()
-                .Where(m => m != null && m.Content != HiddenUserTrigger)
-                .ToList();
+            this.ChatMessages = this.Client.GetConversationSnapshot().ToList();
         }
 
         private static int CountRoughTokens(string text)
@@ -2810,19 +2781,17 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             bool allowElevated = safety.RequiresAdditionalConfirmation;
             var result = await this.Client.ExecuteCommandAsync(request, allowElevated: allowElevated, timeout: TimeSpan.FromSeconds(30));
             string injection = this.Client.BuildCommandResultInjectionPrompt(result);
-
-            // Store injection and add to client conversation so it is available for the next generation
-            this.PendingSystemInjectionPrompt = injection;
-            this.Client.AddSystemMessage(injection);
+            this.UserInput = AppendPromptForAgent(this.UserInput, injection);
 
             this.LastActionMessage = result.Success
-                ? "Command executed automatically (allowed non-admin). Result was injected into the conversation as system/tool output."
+                ? "Command executed automatically (allowed non-admin). Result was appended to prompt."
                 : $"Auto command failed: {result.ErrorMessage ?? "Unknown error"}";
             this.LastActionIsAllowedNonAdminCommand = true;
             this.RequestUiRefresh();
-            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating)
+
+            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
             {
-                await this.StartGenerationAsync(allowEmptyUserInput: true);
+                await this.StartGenerationAsync();
             }
         }
 
@@ -2844,19 +2813,16 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             var result = await this.Client.ExecuteWebSearchAsync(request);
             string injection = this.Client.BuildWebSearchResultInjectionPrompt(result);
-
-            // Store injection and add to client conversation so it is available for the next generation
-            this.PendingSystemInjectionPrompt = injection;
-            this.Client.AddSystemMessage(injection);
+            this.UserInput = AppendPromptForAgent(this.UserInput, injection);
 
             this.LastActionMessage = result.Success
-                ? "Web search executed automatically. Result was injected into the conversation as system/tool output."
+                ? "WebSearch executed automatically. Result was appended to prompt."
                 : $"Auto WebSearch failed: {result.ErrorMessage ?? "Unknown error"}";
             this.RequestUiRefresh();
 
-            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating)
+            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
             {
-                await this.StartGenerationAsync(allowEmptyUserInput: true);
+                await this.StartGenerationAsync();
             }
         }
 
@@ -2903,24 +2869,16 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             var result = await this.Client.ExecuteCommandAsync(request, allowElevated, TimeSpan.FromSeconds(30));
             string injection = this.Client.BuildCommandResultInjectionPrompt(result);
-
-            // Store injection to include it in the next generation's system prompt and
-            // also add it to the client conversation for persistence.
-            this.PendingSystemInjectionPrompt = injection;
-            this.Client.AddSystemMessage(injection);
-
+            this.UserInput = AppendPromptForAgent(this.UserInput, injection);
             this.LastActionMessage = result.Success
-                ? "Command executed. Result was injected into the conversation as system/tool output."
+                ? "Command executed. Result was appended to the prompt."
                 : $"Command failed/blocked: {result.ErrorMessage ?? "Unknown error"}";
 
             this.RequestUiRefresh();
 
-            // Optionally continue generation automatically after tool result by starting
-            // a generation with an invisible user trigger so the model will produce a reply
-            // to the injected system/tool output without showing a user prompt in the UI.
-            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating)
+            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
             {
-                await this.StartGenerationAsync(allowEmptyUserInput: true);
+                await this.StartGenerationAsync();
             }
         }
 
@@ -2954,19 +2912,16 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             var result = await this.Client.ExecuteWebSearchAsync(request);
             string injection = this.Client.BuildWebSearchResultInjectionPrompt(result);
-
-            // Store injection and add to client conversation so it is available for the next generation
-            this.PendingSystemInjectionPrompt = injection;
-            this.Client.AddSystemMessage(injection);
+            this.UserInput = AppendPromptForAgent(this.UserInput, injection);
             this.LastActionMessage = result.Success
-                ? "Web search completed. Result was injected into the conversation as system/tool output."
+                ? "Web search completed. Result was appended to the prompt."
                 : $"Web search failed: {result.ErrorMessage ?? "Unknown error"}";
 
             this.RequestUiRefresh();
 
-            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating)
+            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
             {
-                await this.StartGenerationAsync(allowEmptyUserInput: true);
+                await this.StartGenerationAsync();
             }
         }
 

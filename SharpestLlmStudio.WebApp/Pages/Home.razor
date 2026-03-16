@@ -612,7 +612,7 @@
                                   Click="VM.ToggleLiveModeAsync"
                                   Disabled="@(!VM.IsWhisperLoaded || VM.IsGenerating || VM.IsMicRecording)" />
 
-                    <RadzenButton Text="Generate" Icon="send" ButtonStyle="ButtonStyle.Primary" Disabled="@(!VM.CanSend || !VM.IsLoaded || VM.IsBusy)" Click="@(() => VM.StartGenerationAsync(allowEmptyUserInput: false))" />
+                    <RadzenButton Text="Generate" Icon="send" ButtonStyle="ButtonStyle.Primary" Disabled="@(!VM.CanSend || !VM.IsLoaded || VM.IsBusy)" Click="@VM.StartGenerationAsync" />
                     <RadzenButton Text="Cancel" Icon="stop" ButtonStyle="ButtonStyle.Warning" Disabled="@(!VM.IsGenerating)" Click="@VM.CancelGeneration" />
                     <RadzenButton Text="Reset" Icon="restart_alt" ButtonStyle="ButtonStyle.Light" Disabled="@(VM.IsGenerating)" Click="@VM.ResetConversationAsync" />
                 </RadzenStack>
