@@ -1,6 +1,12 @@
 [
   {
     "Name": "WebApp (https)",
-    "Projects": []
+    "Projects": [
+      {
+        "Path": "SharpestLlmStudio.WebApp\\SharpestLlmStudio.WebApp.csproj",
+        "Action": "Start",
+        "DebugTarget": "https"
+      }
+    ]
   }
 ]

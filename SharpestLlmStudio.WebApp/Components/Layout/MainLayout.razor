@@ -102,25 +102,33 @@
         }
 
         string configuredMode = NormalizeDarkMode(this.Settings.DarkMode);
-        this.darkModeSetting = configuredMode is "on" or "off" ? configuredMode : "off";
 
-        try
+        // If the appsettings explicitly set dark mode to "on" or "off", respect that and
+        // do NOT consult localStorage or browser preference. Only when configured as "auto"
+        // do we allow an override via localStorage or fall back to the browser prefers-color-scheme.
+        if (configuredMode is "on" or "off")
         {
-            string? stored = await this.JS.InvokeAsync<string?>("localStorage.getItem", "ui.darkMode.override");
-            string normalizedStored = NormalizeDarkMode(stored);
-            if (normalizedStored is "on" or "off")
-            {
-                this.darkModeSetting = normalizedStored;
-            }
-            else if (configuredMode == "auto")
-            {
-                bool prefersDark = await this.JS.InvokeAsync<bool>("sharpestNavMenu.getPrefersDarkMode");
-                this.darkModeSetting = prefersDark ? "on" : "off";
-            }
+            this.darkModeSetting = configuredMode;
         }
-        catch
+        else
         {
-            if (configuredMode == "auto")
+            // configuredMode == "auto"
+            this.darkModeSetting = "off";
+            try
+            {
+                string? stored = await this.JS.InvokeAsync<string?>("localStorage.getItem", "ui.darkMode.override");
+                string normalizedStored = NormalizeDarkMode(stored);
+                if (normalizedStored is "on" or "off")
+                {
+                    this.darkModeSetting = normalizedStored;
+                }
+                else
+                {
+                    bool prefersDark = await this.JS.InvokeAsync<bool>("sharpestNavMenu.getPrefersDarkMode");
+                    this.darkModeSetting = prefersDark ? "on" : "off";
+                }
+            }
+            catch
             {
                 try
                 {

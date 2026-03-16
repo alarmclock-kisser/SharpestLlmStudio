@@ -83,7 +83,7 @@ namespace SharpesLlmStudio.Media
                     this.BitDepth = reader.WaveFormat.BitsPerSample;
                     var totalSamples = (int) (reader.Length / (reader.WaveFormat.BitsPerSample / 8));
                     // Ensure we don't allocate absurdly large arrays
-                    if (totalSamples < 0 || totalSamples > 100_000_000)
+                    if (totalSamples < 0 || totalSamples > 1_000_000_000)
                     {
                         totalSamples = 0;
                     }

@@ -432,13 +432,17 @@
                         <RadzenIcon Icon="tune" Style="font-size:1rem;" />
                         <RadzenText TextStyle="TextStyle.Subtitle2" Text="Generation Settings" class="rz-mb-0" />
                         <div style="flex:1"></div>
-                        @if (VM.MonitoringEnabled && VM.LastGenerationStats != null)
+                        @if (VM.MonitoringEnabled)
                         {
                             // Vertical stack or div
                             <div style="display:flex;flex-direction:column;gap:0.1rem;font-size:0.75rem;text-align:right;">
-                                <RadzenText TextStyle="TextStyle.Caption" class="generation-stats-caption generation-stats-in-footer" Text="@VM.GenerationStatsLast" />
-                                <RadzenText TextStyle="TextStyle.Caption" class="generation-stats-caption generation-stats-in-footer" Text="@VM.GenerationStatsPowerUsage" />
-                                <RadzenText TextStyle="TextStyle.Caption" class="generation-stats-caption generation-stats-in-footer" Text="@VM.GenerationStatsContingent" />
+                                @if (VM.LastGenerationStats != null)
+                                {
+                                    <RadzenText TextStyle="TextStyle.Caption" class="generation-stats-caption generation-stats-in-footer" Text="@VM.GenerationStatsLast" />
+                                    <RadzenText TextStyle="TextStyle.Caption" class="generation-stats-caption generation-stats-in-footer" Text="@VM.GenerationStatsPowerUsage" />
+                                    <RadzenText TextStyle="TextStyle.Caption" class="generation-stats-caption generation-stats-in-footer" Text="@VM.GenerationStatsContingent" />
+                                }
+                                <RadzenText TextStyle="TextStyle.Caption" class="generation-stats-caption generation-stats-in-footer" Text="@VM.MemoryStatsDisplay" />
                             </div>
                         }
                         <RadzenButton Icon="@(VM.GenSettingsExpanded ? "remove" : "add")" Size="ButtonSize.Small" class="collapse-btn" Click="VM.ToggleGenSettingsAsync" />
@@ -608,7 +612,7 @@
                                   Click="VM.ToggleLiveModeAsync"
                                   Disabled="@(!VM.IsWhisperLoaded || VM.IsGenerating || VM.IsMicRecording)" />
 
-                    <RadzenButton Text="Generate" Icon="send" ButtonStyle="ButtonStyle.Primary" Disabled="@(!VM.CanSend || !VM.IsLoaded || VM.IsBusy)" Click="@VM.StartGenerationAsync" />
+                    <RadzenButton Text="Generate" Icon="send" ButtonStyle="ButtonStyle.Primary" Disabled="@(!VM.CanSend || !VM.IsLoaded || VM.IsBusy)" Click="@(() => VM.StartGenerationAsync(allowEmptyUserInput: false))" />
                     <RadzenButton Text="Cancel" Icon="stop" ButtonStyle="ButtonStyle.Warning" Disabled="@(!VM.IsGenerating)" Click="@VM.CancelGeneration" />
                     <RadzenButton Text="Reset" Icon="restart_alt" ButtonStyle="ButtonStyle.Light" Disabled="@(VM.IsGenerating)" Click="@VM.ResetConversationAsync" />
                 </RadzenStack>

@@ -4,6 +4,7 @@ using SharpestLlmStudio.Runtime.ONNX;
 using SharpestLlmStudio.Shared;
 using SharpestLlmStudio.WebApp.Components;
 using SharpestLlmStudio.WebApp.ViewModels;
+using Microsoft.AspNetCore.HttpOverrides;
 
 namespace SharpestLlmStudio.WebApp
 {
@@ -63,7 +64,11 @@ namespace SharpestLlmStudio.WebApp
             builder.Services.AddAntiforgery(options =>
             {
                 options.Cookie.SameSite = SameSiteMode.None;
-                options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+                // Use a relaxed policy in Development so local HTTP requests don't fail.
+                // In Production we require Secure cookies.
+                options.Cookie.SecurePolicy = builder.Environment.IsDevelopment()
+                    ? CookieSecurePolicy.SameAsRequest
+                    : CookieSecurePolicy.Always;
                 options.Cookie.HttpOnly = true;
                 options.HeaderName = "X-CSRF-TOKEN";
             });
@@ -81,6 +86,17 @@ namespace SharpestLlmStudio.WebApp
             {
                 app.UseExceptionHandler("/Error");
             }
+
+            // If the app is behind a reverse proxy (terminating TLS), honor the
+            // X-Forwarded-For / X-Forwarded-Proto headers so the framework
+            // correctly recognizes the original request scheme.
+            var forwardedOptions = new ForwardedHeadersOptions
+            {
+                ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+            };
+            // In some containerized setups you may need to clear KnownNetworks / KnownProxies:
+            // forwardedOptions.KnownNetworks.Clear(); forwardedOptions.KnownProxies.Clear();
+            app.UseForwardedHeaders(forwardedOptions);
 
             app.UseHsts();
             app.UseHttpsRedirection();

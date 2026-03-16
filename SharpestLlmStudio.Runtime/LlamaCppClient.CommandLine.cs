@@ -9,8 +9,10 @@ namespace SharpestLlmStudio.Runtime
 {
     public partial class LlamaCppClient
     {
-        private static readonly Regex CommandTagRegex = new("<\\s*/?\\s*cmd_start\\s*>\\s*(?<cmd>[\\s\\S]*?)\\s*<\\s*/?\\s*cmd_end\\s*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        private static readonly Regex CommandTagFallbackRegex = new("<\\s*/?\\s*cmd_start\\s*>\\s*(?<cmd>[\\s\\S]*?)\\s*<\\s*/\\s*cmd_start\\s*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        // Match explicit <commandline>...</commandline> tags (exact tag name requested)
+        private static readonly Regex CommandTagRegex = new("<\\s*commandline\\s*>\\s*(?<cmd>[\\s\\S]*?)\\s*<\\s*/\\s*commandline\\s*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        // Fallback that tolerates a missing slash on the closing tag
+        private static readonly Regex CommandTagFallbackRegex = new("<\\s*commandline\\s*>\\s*(?<cmd>[\\s\\S]*?)\\s*<\\s*/?\\s*commandline\\s*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         public bool TryExtractCommandRequest(string assistantOutput, out LlamaCommandRequest? request)
         {

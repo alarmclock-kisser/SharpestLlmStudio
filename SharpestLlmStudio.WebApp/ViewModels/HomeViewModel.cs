@@ -30,6 +30,16 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.stateChangedListeners += listener;
         }
 
+        // A hidden trigger used to request a generation from the model without showing
+        // a visible user message in the UI. This is a zero-width space so it is non-empty
+        // for the generator but invisible in text rendering.
+        private const string HiddenUserTrigger = "\u200B";
+
+        // When a tool injects a system/result prompt and we want the model to immediately
+        // continue, store the injection here so StartGenerationAsync can include it as
+        // part of the system prompt for the next generation request.
+        private string? PendingSystemInjectionPrompt;
+
         public void UnregisterStateChangeListener(Action listener)
         {
             this.stateChangedListeners -= listener;
@@ -357,7 +367,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         // Sum of estimated tokens for uploaded images (updated on upload)
         public int ImageEstimatedTokensTotal { get; private set; } = 0;
 
-        public string ContextSaveName { get; set; } = "session";
+        public string ContextSaveName { get; set; } = string.Empty;
         public string? SelectedContextFilePath { get; set; } = null;
 
         public string KnowledgeKey { get; set; } = string.Empty;
@@ -681,6 +691,19 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 return wattsUsed > 0 && timeElapsed > 0
                     ? $"power: {wattsUsed:F1} W | cost: {currency}{price:F6}"
                     : "";
+            }
+        }
+
+        public string MemoryStatsDisplay
+        {
+            get
+            {
+                var hw = this.LastHardwareStats;
+                if (hw == null)
+                {
+                    return "RAM: -, VRAM: -";
+                }
+                return $"RAM: {hw.RamStats.MemoryUsagePercentage:F1}% | VRAM: {hw.GpuStats.VramStats.MemoryUsagePercentage:F1}%";
             }
         }
 
@@ -1202,9 +1225,13 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         }
 
         [SupportedOSPlatform("windows")]
-        public async Task StartGenerationAsync()
+        // Parameterless wrapper kept for UI bindings (Radzen Click expects a parameterless Task-returning method).
+        public Task StartGenerationAsync() => StartGenerationAsync(allowEmptyUserInput: false);
+
+        [SupportedOSPlatform("windows")]
+        public async Task StartGenerationAsync(bool allowEmptyUserInput = false)
         {
-            if (this.IsGenerating || !this.IsLoaded || string.IsNullOrWhiteSpace(this.UserInput))
+            if (this.IsGenerating || !this.IsLoaded || (!allowEmptyUserInput && string.IsNullOrWhiteSpace(this.UserInput)))
             {
                 return;
             }
@@ -1237,7 +1264,20 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             if (!this.IsolatedGeneration)
             {
-                this.ChatMessages.Add(new LlamaChatMessage { Role = "user", Content = prompt, CreatedAtUtc = DateTime.UtcNow });
+                // If we are forcing generation with an empty user input (allowEmptyUserInput == true),
+                // we use a hidden trigger as the actual prompt content so the server will accept
+                // it as non-empty, but we do NOT add that hidden trigger to the UI ChatMessages.
+                bool usingHiddenTrigger = string.IsNullOrWhiteSpace(prompt) && allowEmptyUserInput;
+                if (usingHiddenTrigger)
+                {
+                    // Use invisible trigger for the generation call
+                    prompt = HiddenUserTrigger;
+                    // Do not add to ChatMessages to avoid showing an empty/trigger message in UI
+                }
+                else
+                {
+                    this.ChatMessages.Add(new LlamaChatMessage { Role = "user", Content = prompt, CreatedAtUtc = DateTime.UtcNow });
+                }
             }
 
             var assistantMessage = new LlamaChatMessage { Role = "assistant", Content = string.Empty, CreatedAtUtc = DateTime.UtcNow };
@@ -1339,7 +1379,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     this.LastActionMessage = "Generation finished.";
                 }
 
-                this.DetectPendingAgentActions(assistantText);
+                // Detection of agent tool requests will be performed after generation completes
 
                 // Sync UI chat messages from client — ring buffer may have trimmed oldest messages
                 // Keep isolated output visible in UI; do not overwrite it from persistent history.
@@ -1374,6 +1414,12 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 this.IsGenerating = false;
                 this.LastGenerationStats = this.Client.GetLastGenerationStatsSnapshot();
                 this.RequestUiRefresh();
+                // Now that generation is fully finished, detect agent actions in the final assistant output
+                try
+                {
+                    this.DetectPendingAgentActions(assistantText);
+                }
+                catch { }
                 await this.ForceScrollToBottomAsync();
                 await this.TryAutoExecuteAllowedNonAdminCommandAsync();
                 await this.TryAutoExecuteWebSearchAsync();
@@ -2312,7 +2358,11 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         private void SyncChatMessagesFromClient()
         {
-            this.ChatMessages = this.Client.GetConversationSnapshot().ToList();
+            // Pull conversation from client but filter out hidden trigger messages used to
+            // silently prompt the model after tool results.
+            this.ChatMessages = this.Client.GetConversationSnapshot()
+                .Where(m => m != null && m.Content != HiddenUserTrigger)
+                .ToList();
         }
 
         private static int CountRoughTokens(string text)
@@ -2706,7 +2756,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         private void DetectPendingAgentActions(string assistantText)
         {
-            if (string.IsNullOrWhiteSpace(assistantText))
+            // Do not detect or queue tool actions while a generation is still running.
+            if (this.IsGenerating || string.IsNullOrWhiteSpace(assistantText))
             {
                 return;
             }
@@ -2718,7 +2769,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 this.PendingCommandRequest = cmdRequest;
                 this.PendingCommandSafety = this.Client.EvaluateCommandSafety(cmdRequest.Command);
                 string safety = this.PendingCommandSafety.SafetyLevel;
-                this.LastActionMessage = $"Agent-Aktion erkannt: CMD '{safety}' wartet auf Bestätigung.";
+                this.LastActionMessage = $"Agent action detected: command '{safety}' is awaiting confirmation.";
             }
 
             if (this.EnableWebSearchAgentMode && this.PendingWebSearchRequest == null
@@ -2727,8 +2778,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 this.PendingWebSearchRequest = webRequest;
                 this.LastActionMessage = this.PendingCommandRequest != null
-                    ? "Agent-Aktionen erkannt: Kommando + Websuche warten auf Bestätigung."
-                    : "Agent-Aktion erkannt: Websuche wartet auf Bestätigung.";
+                    ? "Agent actions detected: command + web search awaiting confirmation."
+                    : "Agent action detected: web search awaiting confirmation.";
             }
         }
 
@@ -2759,17 +2810,19 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             bool allowElevated = safety.RequiresAdditionalConfirmation;
             var result = await this.Client.ExecuteCommandAsync(request, allowElevated: allowElevated, timeout: TimeSpan.FromSeconds(30));
             string injection = this.Client.BuildCommandResultInjectionPrompt(result);
-            this.UserInput = AppendPromptForAgent(this.UserInput, injection);
+
+            // Store injection and add to client conversation so it is available for the next generation
+            this.PendingSystemInjectionPrompt = injection;
+            this.Client.AddSystemMessage(injection);
 
             this.LastActionMessage = result.Success
-                ? "Command executed automatically (allowed non-admin). Result was appended to prompt."
+                ? "Command executed automatically (allowed non-admin). Result was injected into the conversation as system/tool output."
                 : $"Auto command failed: {result.ErrorMessage ?? "Unknown error"}";
             this.LastActionIsAllowedNonAdminCommand = true;
             this.RequestUiRefresh();
-
-            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
+            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating)
             {
-                await this.StartGenerationAsync();
+                await this.StartGenerationAsync(allowEmptyUserInput: true);
             }
         }
 
@@ -2791,16 +2844,19 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             var result = await this.Client.ExecuteWebSearchAsync(request);
             string injection = this.Client.BuildWebSearchResultInjectionPrompt(result);
-            this.UserInput = AppendPromptForAgent(this.UserInput, injection);
+
+            // Store injection and add to client conversation so it is available for the next generation
+            this.PendingSystemInjectionPrompt = injection;
+            this.Client.AddSystemMessage(injection);
 
             this.LastActionMessage = result.Success
-                ? "WebSearch executed automatically. Result was appended to prompt."
+                ? "Web search executed automatically. Result was injected into the conversation as system/tool output."
                 : $"Auto WebSearch failed: {result.ErrorMessage ?? "Unknown error"}";
             this.RequestUiRefresh();
 
-            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
+            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating)
             {
-                await this.StartGenerationAsync();
+                await this.StartGenerationAsync(allowEmptyUserInput: true);
             }
         }
 
@@ -2819,7 +2875,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             if (safety.IsBlocked)
             {
-                this.LastActionMessage = $"Command blockiert: {safety.Reason}";
+                this.LastActionMessage = $"Command blocked: {safety.Reason}";
                 this.RequestUiRefresh();
                 return;
             }
@@ -2829,11 +2885,11 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 bool confirmed = await this.Js.InvokeAsync<bool>(
                     "confirm",
-                    $"Stärkerer Command erkannt ({safety.SafetyLevel}).\n\nCommand:\n{request.Command}\n\nGrund:\n{safety.Reason}\n\nWirklich ausführen?");
+                    $"Potentially elevated command detected ({safety.SafetyLevel}).\n\nCommand:\n{request.Command}\n\nReason:\n{safety.Reason}\n\nExecute anyway?");
 
                 if (!confirmed)
                 {
-                    this.LastActionMessage = "Stärkerer Command wurde vom Benutzer abgelehnt.";
+                    this.LastActionMessage = "Elevated command was rejected by the user.";
                     this.RequestUiRefresh();
                     return;
                 }
@@ -2842,21 +2898,29 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
 
             request.ShowWindow = this.AgentShowCommandWindow;
-            this.LastActionMessage = $"Führe Command aus ({safety.SafetyLevel}): {request.Command}";
+            this.LastActionMessage = $"Executing command ({safety.SafetyLevel}): {request.Command}";
             this.RequestUiRefresh();
 
             var result = await this.Client.ExecuteCommandAsync(request, allowElevated, TimeSpan.FromSeconds(30));
             string injection = this.Client.BuildCommandResultInjectionPrompt(result);
-            this.UserInput = AppendPromptForAgent(this.UserInput, injection);
+
+            // Store injection to include it in the next generation's system prompt and
+            // also add it to the client conversation for persistence.
+            this.PendingSystemInjectionPrompt = injection;
+            this.Client.AddSystemMessage(injection);
+
             this.LastActionMessage = result.Success
-                ? "Command ausgeführt. Ergebnis wurde an den Prompt angehängt."
-                : $"Command fehlgeschlagen/geblockt: {result.ErrorMessage ?? "Unbekannter Fehler"}";
+                ? "Command executed. Result was injected into the conversation as system/tool output."
+                : $"Command failed/blocked: {result.ErrorMessage ?? "Unknown error"}";
 
             this.RequestUiRefresh();
 
-            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
+            // Optionally continue generation automatically after tool result by starting
+            // a generation with an invisible user trigger so the model will produce a reply
+            // to the injected system/tool output without showing a user prompt in the UI.
+            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating)
             {
-                await this.StartGenerationAsync();
+                await this.StartGenerationAsync(allowEmptyUserInput: true);
             }
         }
 
@@ -2869,7 +2933,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             this.PendingCommandRequest = null;
             this.PendingCommandSafety = null;
-            this.LastActionMessage = "Command-Ausführung wurde verworfen.";
+            this.LastActionMessage = "Command execution was rejected.";
             this.RequestUiRefresh();
         }
 
@@ -2884,22 +2948,25 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             var request = this.PendingWebSearchRequest;
             this.PendingWebSearchRequest = null;
             this.LastActionMessage = request.IsDirectUrl
-                ? $"Lade URL: {request.Url}"
-                : $"Starte Websuche: {request.Query}";
+                ? $"Fetching URL: {request.Url}"
+                : $"Starting web search: {request.Query}";
             this.RequestUiRefresh();
 
             var result = await this.Client.ExecuteWebSearchAsync(request);
             string injection = this.Client.BuildWebSearchResultInjectionPrompt(result);
-            this.UserInput = AppendPromptForAgent(this.UserInput, injection);
+
+            // Store injection and add to client conversation so it is available for the next generation
+            this.PendingSystemInjectionPrompt = injection;
+            this.Client.AddSystemMessage(injection);
             this.LastActionMessage = result.Success
-                ? "Webergebnis geholt. Ergebnis wurde an den Prompt angehängt."
-                : $"Websuche fehlgeschlagen: {result.ErrorMessage ?? "Unbekannter Fehler"}";
+                ? "Web search completed. Result was injected into the conversation as system/tool output."
+                : $"Web search failed: {result.ErrorMessage ?? "Unknown error"}";
 
             this.RequestUiRefresh();
 
-            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput))
+            if (this.AutoContinueAgentActions && this.IsLoaded && !this.IsGenerating)
             {
-                await this.StartGenerationAsync();
+                await this.StartGenerationAsync(allowEmptyUserInput: true);
             }
         }
 
@@ -2911,7 +2978,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
 
             this.PendingWebSearchRequest = null;
-            this.LastActionMessage = "Websuche wurde verworfen.";
+            this.LastActionMessage = "Web search was rejected.";
             this.RequestUiRefresh();
         }
 
@@ -3272,7 +3339,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             if (this.EnableCommandAgentMode)
             {
                 lines.Add("Only emit command requests when the user explicitly asks to execute a command.");
-                lines.Add("Wrap executable command requests strictly in <cmd_start> and <cmd_end> tags.");
+                lines.Add("Wrap executable command requests strictly in <commandline> and </commandline> tags.");
                 lines.Add("Do not output command tags for normal explanations or command suggestions.");
             }
 
