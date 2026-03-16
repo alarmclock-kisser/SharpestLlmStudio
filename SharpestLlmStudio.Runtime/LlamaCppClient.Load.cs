@@ -58,7 +58,7 @@ namespace SharpestLlmStudio.Runtime
                 lock (this._serverStdout) { this._serverStdout.Clear(); }
 
                 // 2. Argumente zusammenbauen
-                var args = $"-m \"{request.ModelInfo.ModelFilePath}\" -ngl {request.GpuLayers} -c {request.ContextSize} -b {Math.Max(1, request.BatchSize)} --host {request.Host} --port {request.Port}";
+                var args = $"-m \"{request.ModelInfo.ModelFilePath}\" -ngl {request.GpuLayers} -c {request.ContextSize} -b {Math.Max(1, request.BatchSize)} -ub {Math.Max(1, request.UBatchSize)} --host {request.Host} --port {request.Port}";
 
                 // For Omni models, always include vision/encoder gguf as --mmproj if available
                 bool shouldIncludeMmproj = request.IncludeMmproj || request.ModelInfo.IsOmni;

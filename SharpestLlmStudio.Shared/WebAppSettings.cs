@@ -24,6 +24,7 @@ namespace SharpestLlmStudio.Shared
         public string DefaultModel { get; set; } = string.Empty;
         public int DefaultContextSize { get; set; } = 4096;
         public int DefaultBatchSize { get; set; } = 512;
+        public int DefaultUBatchSize { get; set; } = 512;
         public int DefaultMaxTokens { get; set; } = 2048;
         public double DefaultTemperature { get; set; } = 0.7;
         public float DefaultTopP { get; set; } = 0.9f;

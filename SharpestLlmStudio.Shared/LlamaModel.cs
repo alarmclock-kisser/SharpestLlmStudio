@@ -180,6 +180,9 @@ namespace SharpestLlmStudio.Shared
         // Batch Size (-b). Tokens, die pro Decode-Schritt gemeinsam verarbeitet werden.
         public int BatchSize { get; set; } = 512;
 
+        // U Batch Size (-ub). Tokens, die pro Encode-Schritt gemeinsam verarbeitet werden. Relevant für Modelle mit separatem Encoder (z.B. Qwen2.5).
+        public int UBatchSize { get; set; } = 512;
+
         // Multimodal Projection mitladen?
         public bool IncludeMmproj { get; set; } = true;
 

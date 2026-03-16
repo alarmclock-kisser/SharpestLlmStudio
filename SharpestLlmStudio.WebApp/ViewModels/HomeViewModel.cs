@@ -5,6 +5,7 @@ using Microsoft.JSInterop;
 using Microsoft.AspNetCore.Components.Web;
 using System.IO;
 using System.Text;
+using System.Text.Json;
 using System.Diagnostics;
 using SharpestLlmStudio.Shared;
 using SharpestLlmStudio.Runtime;
@@ -607,6 +608,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public float GenTopP { get; set; } = 0.9f;
         public int GenTopK { get; set; } = 40;
         public int GenBatchSize { get; set; } = 512;
+        public int GenUBatchSize { get; set; } = 512;
 
         // Panel persistence constants
         public const string ModelExpandedStorageKey = "home.model.expanded";
@@ -1711,6 +1713,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
                 this.GenMaxTokens = this.Settings.DefaultMaxTokens;
                 this.GenBatchSize = this.Settings.DefaultBatchSize;
+                this.GenUBatchSize = this.Settings.DefaultUBatchSize;
                 this.GenTemperature = (float) this.Settings.DefaultTemperature;
                 this.GenTopP = (float) this.Settings.DefaultTopP;
                 this.GenTopK = this.Settings.DefaultTopK;
@@ -2791,6 +2794,127 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             await this.LoadJsonOutputFormatAsync(file);
         }
 
+        // ---- JSON + Image feature support ----
+        public string JsonImageInput { get; set; } = string.Empty;
+        public bool JsonImageInputHasError { get; private set; } = false;
+        public string? JsonImageFileName { get; private set; }
+        private string? jsonImageTempFilePath;
+        public string? RenderedJsonImageDataUrl { get; private set; }
+        public string JsonRenderColor { get; set; } = "#ff0000";
+        public int JsonRenderStrokeWidth { get; set; } = 3;
+
+        public async Task BrowseJsonImageClickAsync()
+        {
+            try
+            {
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.triggerClick", "jsonImagePicker");
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        public async Task OnJsonImageSelectedAsync(InputFileChangeEventArgs args)
+        {
+            if (args == null) return;
+            var file = args.GetMultipleFiles(1).FirstOrDefault();
+            if (file == null) return;
+
+            try
+            {
+                var wwwroot = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "wwwroot"));
+                var tempDir = Path.Combine(wwwroot, "temp");
+                Directory.CreateDirectory(tempDir);
+
+                string safeFileName = Path.GetFileName(file.Name);
+                string guid = Guid.NewGuid().ToString("N");
+                string tempFileName = guid + "_" + safeFileName;
+                string tempFilePath = Path.Combine(tempDir, tempFileName);
+
+                using var stream = file.OpenReadStream(200 * 1024 * 1024);
+                using var fs = new FileStream(tempFilePath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: true);
+                await stream.CopyToAsync(fs);
+
+                this.jsonImageTempFilePath = tempFilePath;
+                this.JsonImageFileName = safeFileName;
+                this.RequestUiRefresh();
+            }
+            catch (Exception ex)
+            {
+                await StaticLogger.LogAsync(ex, "OnJsonImageSelectedAsync");
+            }
+        }
+
+        [SupportedOSPlatform("windows")]
+        public async Task RenderJsonImageAsync()
+        {
+            if (this.IsGenerating) return;
+
+            this.JsonImageInputHasError = false;
+            this.RenderedJsonImageDataUrl = null;
+            this.IsGenerating = true;
+            this.RequestUiRefresh();
+
+            string? tempPath = this.jsonImageTempFilePath;
+            if (string.IsNullOrWhiteSpace(tempPath) || !File.Exists(tempPath))
+            {
+                this.LastActionMessage = "No image selected.";
+                this.IsGenerating = false;
+                this.RequestUiRefresh();
+                return;
+            }
+
+            JsonDocument? jsonDoc = null;
+            try
+            {
+                jsonDoc = JsonDocument.Parse(this.JsonImageInput ?? string.Empty);
+            }
+            catch (JsonException)
+            {
+                this.JsonImageInputHasError = true;
+                this.LastActionMessage = "Invalid JSON input.";
+                this.IsGenerating = false;
+                this.RequestUiRefresh();
+                return;
+            }
+
+            try
+            {
+                var base64 = await ImageHandling.DrawJsonRectanglesOnImageFileAsync(tempPath, jsonDoc, this.JsonRenderColor, Math.Max(1, this.JsonRenderStrokeWidth));
+                if (!string.IsNullOrWhiteSpace(base64))
+                {
+                    this.RenderedJsonImageDataUrl = "data:image/png;base64," + base64;
+                    this.LastActionMessage = "Rendered image successfully.";
+                }
+                else
+                {
+                    this.LastActionMessage = "Failed to render image.";
+                }
+            }
+            catch (Exception ex)
+            {
+                await StaticLogger.LogAsync(ex, "RenderJsonImageAsync");
+                this.LastActionMessage = "Error during rendering.";
+            }
+            finally
+            {
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(tempPath) && File.Exists(tempPath))
+                    {
+                        File.Delete(tempPath);
+                    }
+                }
+                catch { }
+
+                this.jsonImageTempFilePath = null;
+                this.JsonImageFileName = null;
+                this.IsGenerating = false;
+                this.RequestUiRefresh();
+            }
+        }
+
         public string RenderChatContent(string content)
         {
             string displayContent = StaticLogics.GetDisplayContent(content ?? string.Empty);
@@ -3194,6 +3318,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                         ServerExecutablePath = this.Settings.ServerExecutablePath,
                         ContextSize = this.ContextSize,
                         BatchSize = this.GenBatchSize,
+                        UBatchSize = this.GenUBatchSize,
                         UseFlashAttention = this.UseFlashAttention,
                         IncludeMmproj = this.UseMmproj,
                         UseNoWarmup = this.NoWarmup
@@ -3203,7 +3328,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     await StaticLogger.LogAsync($"[Blazor]   Executable : {loadRequest.ServerExecutablePath}");
                     await StaticLogger.LogAsync($"[Blazor]   ModelFile  : {modelToLoad.ModelFilePath}");
                     await StaticLogger.LogAsync($"[Blazor]   Mmproj     : {(loadRequest.IncludeMmproj ? modelToLoad.MmprojFilePath ?? "(none)" : "(disabled)")}");
-                    await StaticLogger.LogAsync($"[Blazor]   Context    : {loadRequest.ContextSize}  Batch: {loadRequest.BatchSize}  FlashAttn: {loadRequest.UseFlashAttention}");
+                    await StaticLogger.LogAsync($"[Blazor]   Context    : {loadRequest.ContextSize}  Batch: {loadRequest.BatchSize}  UBatch: {loadRequest.UBatchSize}  FlashAttn: {loadRequest.UseFlashAttention}");
                     if (loadRequest.UseFlashAttention && modelToLoad.IsTernaryQuantized)
                     {
                         await StaticLogger.LogAsync($"[Blazor]   NOTE: Flash Attention will be auto-disabled for ternary quantized model '{modelToLoad.Name}'.");
@@ -3379,7 +3504,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                         continue;
                     }
 
-                    if (sentence[^1] != '.' && sentence[^1] != '!' && sentence[^1] != '?')
+                    if (sentence[^1] != '.' && sentence[^1] != '!' && sentence[^1] != '?' && sentence[^1] != ':')
                     {
                         sentence += ".";
                     }
