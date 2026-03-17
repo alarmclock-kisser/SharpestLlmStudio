@@ -11,21 +11,22 @@
 @using Radzen.Blazor
 
 @inject HomeViewModel VM
+@inject IJSRuntime JSRuntime
 @implements IDisposable
 
 <PageTitle>Home – SharpestLlmStudio</PageTitle>
 
 <div class="page-wrapper">
     <div class="top-panels-container">
-        <div id="top-panels-content" class="top-panels-content">
+        <div id="top-panels-content" class="top-panels-content" data-expanded="@VM.TopPanelsExpanded.ToString().ToLowerInvariant()" style="transition:max-height 0.28s ease;overflow:hidden;">
             <RadzenStack Gap="1rem" class="home-shell top-panels-shell">
             <RadzenCard class="management-tabs-card">
                 <div class="management-tab-header">
-                    <button type="button" class="management-tab-button @(_managementTabIndex == 0 ? "active" : null)" @onclick="() => _managementTabIndex = 0">Model Management</button>
-                    <button type="button" class="management-tab-button @(_managementTabIndex == 1 ? "active" : null)" @onclick="() => _managementTabIndex = 1">Context Management</button>
-                    <button type="button" class="management-tab-button @(_managementTabIndex == 2 ? "active" : null)" @onclick="() => _managementTabIndex = 2">Knowledge Base</button>
-                    <button type="button" class="management-tab-button @(_managementTabIndex == 3 ? "active" : null)" @onclick="() => _managementTabIndex = 3">Speech-to-Text</button>
-                    <button type="button" class="management-tab-button @(_managementTabIndex == 4 ? "active" : null)" @onclick="() => _managementTabIndex = 4">JSON + Image</button>
+                    <button type="button" class="management-tab-button @(_managementTabIndex == 0 ? "active" : null)" @onclick="() => OnManagementTabClick(0)">Model Management</button>
+                    <button type="button" class="management-tab-button @(_managementTabIndex == 1 ? "active" : null)" @onclick="() => OnManagementTabClick(1)">Context Management</button>
+                    <button type="button" class="management-tab-button @(_managementTabIndex == 2 ? "active" : null)" @onclick="() => OnManagementTabClick(2)">Knowledge Base</button>
+                    <button type="button" class="management-tab-button @(_managementTabIndex == 3 ? "active" : null)" @onclick="() => OnManagementTabClick(3)">Speech-to-Text</button>
+                    <button type="button" class="management-tab-button @(_managementTabIndex == 4 ? "active" : null)" @onclick="() => OnManagementTabClick(4)">JSON + Image</button>
                 </div>
 
                 <div class="management-tab-body">
@@ -126,7 +127,14 @@
                             </RadzenFormField>
 
                             <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.6rem">
-                                <RadzenButton Text="Browse Image" Icon="image" ButtonStyle="ButtonStyle.Light" Click="@VM.BrowseJsonImageClickAsync" />
+                                @if (string.IsNullOrWhiteSpace(VM.JsonImageFileName))
+                                {
+                                    <RadzenButton Text="Upload Image" Icon="image" ButtonStyle="ButtonStyle.Light" Click="@VM.BrowseJsonImageClickAsync" />
+                                }
+                                else
+                                {
+                                    <RadzenButton Text="Clear Image" Icon="close" ButtonStyle="ButtonStyle.Danger" Click="@VM.ClearJsonImageAsync" />
+                                }
                                 <InputFile id="jsonImagePicker" OnChange="VM.OnJsonImageSelectedAsync" accept="image/*" style="display:none;" />
                                 <RadzenText TextStyle="TextStyle.Caption" Text="@(!string.IsNullOrWhiteSpace(VM.JsonImageFileName) ? $"Selected: {VM.JsonImageFileName}" : "No image selected")" />
 
@@ -138,6 +146,11 @@
                                 </label>
 
                                 <RadzenNumeric @bind-Value="VM.JsonRenderStrokeWidth" TValue="int" Min="1" Max="20" Style="width:100px;" />
+
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.25rem">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.JsonRenderLabels" />
+                                    <RadzenLabel Text="Draw Labels" />
+                                </RadzenStack>
 
                                 <RadzenButton Text="Render" Icon="image_search" ButtonStyle="ButtonStyle.Primary" Disabled="@VM.IsGenerating" Click="@VM.RenderJsonImageAsync" />
                             </RadzenStack>
@@ -382,9 +395,7 @@
 
             </RadzenStack>
         </div>
-        <div id="top-panels-resize-handle" class="top-panels-resize-handle" title="Drag to resize">
-            <RadzenIcon Icon="drag_indicator" />
-        </div>
+        <!-- resize handle removed: top panels are now auto-expanded/collapsed via tab clicks -->
     </div>
 
     <div class="page-content-wrapper">
@@ -533,10 +544,6 @@
                                 <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem" class="settings-toggle-item">
                                     <RadzenCheckBox TValue="bool" @bind-Value="VM.AutoContinueAgentActions" Name="autoContinueAgentActions" />
                                     <RadzenLabel Text="Auto Continue" Component="autoContinueAgentActions" />
-                                </RadzenStack>
-                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem" class="settings-toggle-item">
-                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.AgentShowCommandWindow" Name="agentShowCmdWindow" />
-                                    <RadzenLabel Text="Show CMD Window" Component="agentShowCmdWindow" />
                                 </RadzenStack>
                             </RadzenStack>
 
@@ -694,6 +701,28 @@
     private DotNetObjectReference<HomeViewModel>? _vmRef;
     private CancellationTokenSource? _renderCts;
 
+    private async Task OnManagementTabClick(int index)
+    {
+        if (_managementTabIndex == index)
+        {
+            // toggle collapse when clicking active tab
+            VM.TopPanelsExpanded = !VM.TopPanelsExpanded;
+        }
+        else
+        {
+            _managementTabIndex = index;
+            // ensure expanded when switching tabs
+            VM.TopPanelsExpanded = true;
+            // inform ViewModel which tab is active so it can pick a preferred height
+            try { VM.ActiveManagementTabIndex = index; } catch { }
+        }
+
+        // After toggling, ensure top-panels sizing is updated to fit to footer and enable inner scrolling if needed
+        try { await JSRuntime.InvokeVoidAsync("sharpestNavMenu.ensureTopPanelsExpandedToFooter", "top-panels-content", "chat-footer"); } catch { }
+
+        StateHasChanged();
+    }
+
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (firstRender)
@@ -701,6 +730,8 @@
             VM.RegisterStateChangeListener(OnViewModelStateChanged);
             _vmRef = DotNetObjectReference.Create(VM);
             await VM.OnFirstRenderAsync(_vmRef);
+            // Ensure top panels sizing is correct after initial render
+            try { await JSRuntime.InvokeVoidAsync("sharpestNavMenu.ensureTopPanelsExpandedToFooter", "top-panels-content", "chat-footer"); } catch { }
             StateHasChanged();
             return;
         }
@@ -708,6 +739,8 @@
         if (_vmRef != null)
         {
             await VM.OnSubsequentRenderAsync(_vmRef);
+            // Re-evaluate top panels sizing on subsequent renders
+            try { await JSRuntime.InvokeVoidAsync("sharpestNavMenu.ensureTopPanelsExpandedToFooter", "top-panels-content", "chat-footer"); } catch { }
         }
     }
 

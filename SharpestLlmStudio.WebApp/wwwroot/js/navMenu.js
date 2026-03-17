@@ -282,38 +282,144 @@ window.sharpestNavMenu = {
         window.addEventListener('resize', scroller._footerWindowResizeHandler, { passive: true });
     },
 
-    setupVerticalResizeHandle: function (handleId, targetId, minHeight, maxHeight) {
-        const handle = document.getElementById(handleId);
-        const target = document.getElementById(targetId);
-        if (!handle || !target) return;
+    // Setup a draggable vertical resize handle to control the top-panels content height.
+    // handleId: id of the handle element; contentId: id of the top-panels content container;
+    // minHeightPx: minimum height for the content; defaultHeightPx: optional initial height fallback.
+    setupVerticalResizeHandle: function (handleId, contentId, minHeightPx, defaultHeightPx) {
+        try {
+            var handle = document.getElementById(handleId);
+            var content = document.getElementById(contentId);
+            if (!handle || !content) return;
 
-        if (handle._resizeAttached) return;
-        handle._resizeAttached = true;
+            // Ensure the handle is visible and styled
+            handle.style.cursor = 'row-resize';
+            handle.style.userSelect = 'none';
 
-        let startY = 0;
-        let startHeight = 0;
+            var dragging = false;
+            var startY = 0;
+            var startHeight = 0;
 
-        const onMove = (ev) => {
-            const delta = ev.clientY - startY;
-            const next = Math.min(maxHeight ?? 900, Math.max(minHeight ?? 160, startHeight + delta));
-            target.style.maxHeight = `${next}px`;
-            target.style.height = `${next}px`;
-        };
+            var getFooterTop = function () {
+                var footer = document.getElementById('chat-footer');
+                return footer ? footer.getBoundingClientRect().top : window.innerHeight;
+            };
 
-        const onUp = () => {
-            document.removeEventListener('mousemove', onMove);
-            document.removeEventListener('mouseup', onUp);
-            document.body.style.userSelect = '';
-        };
+            var clamp = function (v, a, b) { return Math.max(a, Math.min(b, v)); };
 
-        handle.addEventListener('mousedown', (ev) => {
-            ev.preventDefault();
-            startY = ev.clientY;
-            startHeight = target.getBoundingClientRect().height;
-            document.body.style.userSelect = 'none';
-            document.addEventListener('mousemove', onMove);
-            document.addEventListener('mouseup', onUp);
-        });
+            var updateMaxHeightToFitFooter = function () {
+                try {
+                    var rect = content.getBoundingClientRect();
+                    var top = rect.top;
+                    var footerTop = getFooterTop();
+                    var available = Math.max(120, Math.floor(footerTop - top - 12));
+                    // if content currently has no explicit maxHeight, set default
+                    if (!content.style.maxHeight || content.style.maxHeight === '0px') {
+                        var initial = Number.isFinite(defaultHeightPx) ? defaultHeightPx : available;
+                        content.style.maxHeight = clamp(initial, minHeightPx || 120, available) + 'px';
+                    }
+                    return available;
+                } catch (e) { return window.innerHeight; }
+            };
+
+            var onPointerMove = function (ev) {
+                if (!dragging) return;
+                ev.preventDefault();
+                var curY = ev.clientY || (ev.touches && ev.touches[0] && ev.touches[0].clientY) || 0;
+                var delta = curY - startY;
+                var newHeight = startHeight + delta;
+                // cap to footer
+                var rect = content.getBoundingClientRect();
+                var top = rect.top;
+                var footerTop = getFooterTop();
+                var maxAllowed = Math.max(minHeightPx || 120, Math.floor(footerTop - top - 12));
+                newHeight = clamp(newHeight, minHeightPx || 120, maxAllowed);
+                content.style.maxHeight = newHeight + 'px';
+                // ensure inner card body stays scrollable when needed
+                var card = content.querySelector('.management-tabs-card');
+                if (card) {
+                    card.style.maxHeight = newHeight + 'px';
+                }
+            };
+
+            var onPointerUp = function (ev) {
+                if (!dragging) return;
+                dragging = false;
+                document.removeEventListener('pointermove', onPointerMove);
+                document.removeEventListener('pointerup', onPointerUp);
+                // final adjustment
+                try { window.sharpestNavMenu.ensureTopPanelsExpandedToFooter(contentId, 'chat-footer'); } catch { }
+            };
+
+            handle.addEventListener('pointerdown', function (ev) {
+                try {
+                    ev.preventDefault();
+                    dragging = true;
+                    startY = ev.clientY || (ev.touches && ev.touches[0] && ev.touches[0].clientY) || 0;
+                    // parse current height or fallback to computed
+                    startHeight = parseInt((content.style.maxHeight || '').replace('px','')) || content.getBoundingClientRect().height || (defaultHeightPx || 300);
+                    document.addEventListener('pointermove', onPointerMove, { passive: false });
+                    document.addEventListener('pointerup', onPointerUp, { passive: false });
+                } catch (e) { dragging = false; }
+            }, { passive: false });
+
+            // Recompute sizing on window resize
+            var resizeHandler = function () {
+                try {
+                    window.sharpestNavMenu.ensureTopPanelsExpandedToFooter(contentId, 'chat-footer');
+                } catch { }
+            };
+
+            window.addEventListener('resize', resizeHandler, { passive: true });
+
+            // Initial sizing
+            setTimeout(function () { updateMaxHeightToFitFooter(); try { window.sharpestNavMenu.ensureTopPanelsExpandedToFooter(contentId, 'chat-footer'); } catch{} }, 50);
+        } catch (e) {
+            // ignore
+        }
+    },
+
+    // Ensure top panels expand to available space until footer; if content exceeds available space, make inner area scrollable.
+    ensureTopPanelsExpandedToFooter: function (topPanelsContentId, footerId) {
+        try {
+            var content = document.getElementById(topPanelsContentId);
+            var footer = document.getElementById(footerId);
+            if (!content) return;
+
+            // Compute available height from top of content to top of footer (or viewport bottom)
+            var rect = content.getBoundingClientRect();
+            var top = rect.top;
+            var footerTop = footer ? footer.getBoundingClientRect().top : window.innerHeight;
+            var available = Math.max(120, Math.floor(footerTop - top - 12)); // leave small gap
+
+            // Apply max-height to content so it can expand to that size (up to footer)
+            content.style.maxHeight = available + 'px';
+            content.style.overflow = 'hidden';
+
+            // Find inner card element (management-tabs-card) and size it to fit under the tab header
+            var card = content.querySelector('.management-tabs-card');
+            if (!card) return;
+
+            // Determine header height inside the card to reserve space
+            var header = card.querySelector('.management-tab-header');
+            var headerHeight = header ? Math.ceil(header.getBoundingClientRect().height) : 48;
+
+            // Calculate available height for the card body (leave small gap)
+            var availableForCard = Math.max(120, available - headerHeight - 16);
+
+            // Apply sizing: make card a column flex container and limit its max-height to the available space
+            card.style.display = 'flex';
+            card.style.flexDirection = 'column';
+            card.style.maxHeight = availableForCard + headerHeight + 'px';
+
+            // Make the body area scrollable if its content exceeds available space
+            var body = card.querySelector('.management-tab-body');
+            if (body) {
+                body.style.overflowY = 'auto';
+                body.style.flex = '1 1 auto';
+            }
+        } catch (e) {
+            // ignore
+        }
     },
 
     getImageDimensionsFromDataUrl: function (dataUrl) {

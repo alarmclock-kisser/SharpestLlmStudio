@@ -50,7 +50,7 @@ namespace SharpestLlmStudio.Shared
 
             double hours = Math.Max(0.0, totalGenerationTime?.TotalHours ?? 0.0);
             double requestCost = hours > 0.0
-                ? (watts * hours / 1000.0) * Math.Max(0.0, pricePerKiloWattHour)
+                ? (watts * hours / 1000.0) * Math.Max(0.0, pricePerKiloWattHour * 100)
                 : 0.0;
 
             lock (AccumulatedTotalsLock)

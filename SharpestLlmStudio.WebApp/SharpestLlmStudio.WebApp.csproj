@@ -18,6 +18,10 @@
     <ProjectReference Include="..\SharpesLlmStudio.Media\SharpesLlmStudio.Media.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Folder Include="Services\" />
+  </ItemGroup>
+
   <PropertyGroup>
     <ApplicationIcon>wwwroot\favicon.ico</ApplicationIcon>
   </PropertyGroup>

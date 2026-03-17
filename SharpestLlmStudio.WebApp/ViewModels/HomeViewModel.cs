@@ -627,8 +627,57 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public bool ImageAttachmentsExpanded { get; set; } = true;
         public bool GenSettingsExpanded { get; set; } = false;
         public bool AutoScrollEnabled { get; set; } = true;
+        // Controls whether the top management panels area is expanded (visible) or collapsed.
+        private bool topPanelsExpanded = true;
+        public bool TopPanelsExpanded
+        {
+            get => this.topPanelsExpanded;
+            set
+            {
+                if (this.topPanelsExpanded == value) return;
+                this.topPanelsExpanded = value;
+                this.RequestUiRefresh();
+            }
+        }
 
-        private bool enableCommandAgentMode = true;
+        // Active management tab index (kept in ViewModel so it can control per-tab expansion heights)
+        private int activeManagementTabIndex = 0;
+        public int ActiveManagementTabIndex
+        {
+            get => this.activeManagementTabIndex;
+            set
+            {
+                if (this.activeManagementTabIndex == value) return;
+                this.activeManagementTabIndex = value;
+                this.RequestUiRefresh();
+            }
+        }
+
+        public int ViewPortHeight { get; private set; } = 900;
+
+        // Returns an inline style for the top-panels-content that ensures the expanded area
+        // fits the active tab's preferred height. When collapsed, max-height is set to 0.
+        public string TopPanelsMaxHeightStyle
+        {
+            get
+            {
+                if (!this.TopPanelsExpanded)
+                {
+                    return "max-height:0;overflow:hidden;transition:max-height 0.28s ease;";
+                }
+
+                // preferred heights per tab (px). Tune as needed.
+                int[] preferred = new int[] { 520, 360, 520, 360, 620 };
+                int idx = Math.Clamp(this.ActiveManagementTabIndex, 0, preferred.Length - 1);
+                int height = preferred[idx];
+                // cap to viewport percentage if very tall
+                int maxViewportPx = (int)(this.ViewPortHeight * 0.85);
+                int final = Math.Min(height, Math.Max(200, maxViewportPx));
+                return $"max-height:{final}px;overflow:hidden;transition:max-height 0.28s ease;";
+            }
+        }
+
+        private bool enableCommandAgentMode = false;
         public bool EnableCommandAgentMode
         {
             get => this.enableCommandAgentMode;
@@ -642,7 +691,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
         }
 
-        private bool enableWebSearchAgentMode = true;
+        private bool enableWebSearchAgentMode = false;
         public bool EnableWebSearchAgentMode
         {
             get => this.enableWebSearchAgentMode;
@@ -659,7 +708,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public bool AutoAllowWebSearch { get; set; } = true;
         public bool AutoContinueAgentActions { get; set; } = false;
         public bool AllowAllNonAdminCommands { get; set; } = false;
-        public bool AgentShowCommandWindow { get; set; }
+        public bool AgentShowCommandWindow { get; set; } = false;
 
         public LlamaCommandRequest? PendingCommandRequest { get; private set; }
         public LlamaWebSearchRequest? PendingWebSearchRequest { get; private set; }
@@ -1270,6 +1319,9 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 return;
             }
+
+            // Collapse top panels when starting a generation so the user sees the chat area
+            try { this.TopPanelsExpanded = false; } catch { }
 
             this.generationCts?.Cancel();
             this.generationCts?.Dispose();
@@ -2663,6 +2715,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 if (cancellationToken.IsCancellationRequested) return;
                 await this.Js.InvokeVoidAsync("sharpestNavMenu.setupThinkBlocks", ChatOutputElementId);
                 if (cancellationToken.IsCancellationRequested) return;
+                // Initialize vertical resize handle so user can drag top panels down/up. Provide minHeight and default.
                 await this.Js.InvokeVoidAsync("sharpestNavMenu.setupVerticalResizeHandle", TopPanelsResizeHandleElementId, TopPanelsContentElementId, 140, 900);
                 if (cancellationToken.IsCancellationRequested) return;
                 await this.Js.InvokeVoidAsync("sharpestNavMenu.setupMicButton", "micButton", vmRef, "audioFilePicker");
@@ -2738,6 +2791,11 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public async Task ToggleGenSettingsAsync()
         {
             this.GenSettingsExpanded = !this.GenSettingsExpanded;
+            // When opening generation settings, collapse the top management panels to focus the content area
+            if (this.GenSettingsExpanded)
+            {
+                try { this.TopPanelsExpanded = false; } catch { }
+            }
             await this.PersistPanelStatesAsync();
         }
 
@@ -2802,6 +2860,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public string? RenderedJsonImageDataUrl { get; private set; }
         public string JsonRenderColor { get; set; } = "#ff0000";
         public int JsonRenderStrokeWidth { get; set; } = 3;
+        public bool JsonRenderLabels { get; set; } = false;
 
         public async Task BrowseJsonImageClickAsync()
         {
@@ -2827,6 +2886,19 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 var tempDir = Path.Combine(wwwroot, "temp");
                 Directory.CreateDirectory(tempDir);
 
+                // If there is an existing temporary image, delete it (we replace with the new upload)
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(this.jsonImageTempFilePath) && File.Exists(this.jsonImageTempFilePath))
+                    {
+                        File.Delete(this.jsonImageTempFilePath);
+                    }
+                }
+                catch
+                {
+                    // ignore deletion failures
+                }
+
                 string safeFileName = Path.GetFileName(file.Name);
                 string guid = Guid.NewGuid().ToString("N");
                 string tempFileName = guid + "_" + safeFileName;
@@ -2838,6 +2910,9 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
                 this.jsonImageTempFilePath = tempFilePath;
                 this.JsonImageFileName = safeFileName;
+                // keep the uploaded file and path around so user can re-render multiple times
+                // clear any previous rendered result; user may re-render against same image or with new JSON
+                this.RenderedJsonImageDataUrl = null;
                 this.RequestUiRefresh();
             }
             catch (Exception ex)
@@ -2881,7 +2956,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             try
             {
-                var base64 = await ImageHandling.DrawJsonRectanglesOnImageFileAsync(tempPath, jsonDoc, this.JsonRenderColor, Math.Max(1, this.JsonRenderStrokeWidth));
+                var base64 = await ImageHandling.DrawJsonRectanglesOnImageFileAsync(tempPath, jsonDoc, this.JsonRenderColor, Math.Max(1, this.JsonRenderStrokeWidth), this.JsonRenderLabels);
                 if (!string.IsNullOrWhiteSpace(base64))
                 {
                     this.RenderedJsonImageDataUrl = "data:image/png;base64," + base64;
@@ -2899,20 +2974,30 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
             finally
             {
-                try
-                {
-                    if (!string.IsNullOrWhiteSpace(tempPath) && File.Exists(tempPath))
-                    {
-                        File.Delete(tempPath);
-                    }
-                }
-                catch { }
-
-                this.jsonImageTempFilePath = null;
-                this.JsonImageFileName = null;
+                // Do NOT delete or clear the uploaded image here. Keep the temp file and name
+                // so the user can re-render multiple times. Clearing/removal is handled by ClearJsonImageAsync.
                 this.IsGenerating = false;
                 this.RequestUiRefresh();
             }
+        }
+
+        public async Task ClearJsonImageAsync()
+        {
+            // Explicitly remove the uploaded temp file and clear UI state when user requests it.
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(this.jsonImageTempFilePath) && File.Exists(this.jsonImageTempFilePath))
+                {
+                    try { File.Delete(this.jsonImageTempFilePath); } catch { }
+                }
+            }
+            catch { }
+
+            this.jsonImageTempFilePath = null;
+            this.JsonImageFileName = null;
+            this.RenderedJsonImageDataUrl = null;
+            this.RequestUiRefresh();
+            await Task.CompletedTask;
         }
 
         public string RenderChatContent(string content)

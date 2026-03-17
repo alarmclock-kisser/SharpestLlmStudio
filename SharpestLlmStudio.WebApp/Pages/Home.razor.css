@@ -11,15 +11,15 @@
     flex: 0 0 auto;
     display: flex;
     flex-direction: column;
-    min-height: 140px;
+    min-height: 0px;
     min-width: 0;
 }
 
 .top-panels-content {
     flex: 0 0 auto;
-    min-height: 100px;
-    height:320px;
-    max-height: 60vh;
+    min-height: 70px;
+    /* height is controlled dynamically via JS/inline max-height to allow dragging and footer-aware sizing */
+    max-height: 70vh;
     overflow: hidden;
     overflow-x: hidden;
     padding-bottom: 0;
@@ -28,13 +28,13 @@
 
 .top-panels-shell {
     height: 100%;
-    min-height: 0;
+    min-height: 70px;
     display: flex;
     flex-direction: column;
 }
 
 .top-panels-resize-handle {
-    height: 12px;
+    height: 10px;
     border-top: 1px solid var(--rz-base-300);
     border-bottom: 1px solid var(--rz-base-300);
     cursor: ns-resize;
@@ -55,6 +55,8 @@
     flex: 1 1 auto;
     min-height: 0;
     position: relative;
+    /* ensure the top-panels expansion pushes the page-content down rather than overlaying it */
+    display: block;
 }
 
 /* ── Scrollable content: everything ABOVE the footer scrolls here ── */
