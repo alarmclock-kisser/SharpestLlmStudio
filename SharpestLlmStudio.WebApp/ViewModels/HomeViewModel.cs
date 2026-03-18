@@ -782,16 +782,16 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
         }
 
-        public string MemoryStatsDisplay
+        public string StatsDisplay
         {
             get
             {
                 var hw = this.LastHardwareStats;
                 if (hw == null)
                 {
-                    return "RAM: -, VRAM: -";
+                    return "RAM: -, VRAM: - GPU: -, CPU: -";
                 }
-                return $"RAM: {hw.RamStats.MemoryUsagePercentage:F1}% | VRAM: {hw.GpuStats.VramStats.MemoryUsagePercentage:F1}%";
+                return $"RAM: {hw.RamStats.MemoryUsagePercentage:F1}% | VRAM: {hw.GpuStats.VramStats.MemoryUsagePercentage:F1}% | GPU: {hw.GpuStats.CoreLoadPercentage:F1}% | CPU: {hw.CpuStats.AverageLoadPercentage:F1}%";
             }
         }
 
