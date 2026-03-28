@@ -47,26 +47,38 @@ namespace SharpestLlmStudio.WebApp
             builder.Services.AddSingleton<OnnxWhisperService>(provider =>
                 new OnnxWhisperService(webAppSettings));
 
-            // HTTPS-Umleitung und HSTS aktivieren
-            builder.Services.AddHttpsRedirection(options =>
-            {
-                options.RedirectStatusCode = StatusCodes.Status308PermanentRedirect;
-            });
+            // Decide whether HTTPS features should be enabled based on configured URLs.
+            // When the app is run without HTTPS (single-file, self-contained builds may use HTTP)
+            // enabling HSTS / HTTPS redirection and requiring Secure cookies will cause runtime
+            // errors. Detect configured URLs and only enable HTTPS features when an https:// URL
+            // is present.
+            var configuredUrls = builder.Configuration["ASPNETCORE_URLS"] ?? Environment.GetEnvironmentVariable("ASPNETCORE_URLS") ?? builder.Configuration["urls"];
+            var enableHttps = !string.IsNullOrEmpty(configuredUrls) && configuredUrls.Contains("https://", StringComparison.OrdinalIgnoreCase);
 
-            builder.Services.AddHsts(options =>
+            if (enableHttps)
             {
-                options.Preload = true;
-                options.IncludeSubDomains = true;
-                options.MaxAge = TimeSpan.FromDays(365);
-            });
+                // HTTPS-Umleitung und HSTS aktivieren
+                builder.Services.AddHttpsRedirection(options =>
+                {
+                    options.RedirectStatusCode = StatusCodes.Status308PermanentRedirect;
+                });
+
+                builder.Services.AddHsts(options =>
+                {
+                    options.Preload = true;
+                    options.IncludeSubDomains = true;
+                    options.MaxAge = TimeSpan.FromDays(365);
+                });
+            }
 
             // Antiforgery-Cookie für die Sicherstellung von SameSite-Attributen
             builder.Services.AddAntiforgery(options =>
             {
-                options.Cookie.SameSite = SameSiteMode.None;
-                // Use a relaxed policy in Development so local HTTP requests don't fail.
-                // In Production we require Secure cookies.
-                options.Cookie.SecurePolicy = builder.Environment.IsDevelopment()
+                // If HTTPS is enabled, we can use SameSite=None (required for some cross-site scenarios)
+                // and set Secure. When running over plain HTTP (single-file self-contained scenarios)
+                // browsers will warn if SameSite=None is set without Secure, so use Lax in that case.
+                options.Cookie.SameSite = enableHttps ? SameSiteMode.None : SameSiteMode.Lax;
+                options.Cookie.SecurePolicy = (builder.Environment.IsDevelopment() || !enableHttps)
                     ? CookieSecurePolicy.SameAsRequest
                     : CookieSecurePolicy.Always;
                 options.Cookie.HttpOnly = true;
@@ -98,8 +110,11 @@ namespace SharpestLlmStudio.WebApp
             // forwardedOptions.KnownNetworks.Clear(); forwardedOptions.KnownProxies.Clear();
             app.UseForwardedHeaders(forwardedOptions);
 
-            app.UseHsts();
-            app.UseHttpsRedirection();
+            if (enableHttps)
+            {
+                app.UseHsts();
+                app.UseHttpsRedirection();
+            }
 
             app.UseStaticFiles();
 
