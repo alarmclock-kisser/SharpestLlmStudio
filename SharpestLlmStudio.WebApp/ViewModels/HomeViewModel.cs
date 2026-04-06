@@ -2941,9 +2941,71 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
 
             JsonDocument? jsonDoc = null;
+
+            string inputText = this.JsonImageInput ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(inputText))
+            {
+                this.JsonImageInputHasError = true;
+                this.LastActionMessage = "Empty JSON input.";
+                this.IsGenerating = false;
+                this.RequestUiRefresh();
+                return;
+            }
+
+            // Try to locate and extract the first JSON object/array from the provided text.
+            static string? TryExtractJson(string text)
+            {
+                if (string.IsNullOrWhiteSpace(text)) return null;
+                // Find first opening bracket '{' or '['
+                int start = -1;
+                char open = '\0';
+                for (int i = 0; i < text.Length; i++)
+                {
+                    if (text[i] == '{' || text[i] == '[')
+                    {
+                        start = i;
+                        open = text[i];
+                        break;
+                    }
+                }
+
+                if (start == -1) return null;
+
+                char close = open == '{' ? '}' : ']';
+                int depth = 0;
+                int end = -1;
+
+                for (int i = start; i < text.Length; i++)
+                {
+                    if (text[i] == open) depth++;
+                    else if (text[i] == close) depth--;
+
+                    if (depth == 0)
+                    {
+                        end = i;
+                        break;
+                    }
+                }
+
+                if (end == -1 || end <= start) return null;
+
+                var candidate = text.Substring(start, end - start + 1).Trim();
+                return candidate.Length > 0 ? candidate : null;
+            }
+
+            string? extracted = TryExtractJson(inputText);
+            if (extracted == null)
+            {
+                this.JsonImageInputHasError = true;
+                this.LastActionMessage = "Invalid JSON input.";
+                this.IsGenerating = false;
+                this.RequestUiRefresh();
+                return;
+            }
+
             try
             {
-                jsonDoc = JsonDocument.Parse(this.JsonImageInput ?? string.Empty);
+                jsonDoc = JsonDocument.Parse(extracted, new JsonDocumentOptions { AllowTrailingCommas = true });
             }
             catch (JsonException)
             {
@@ -3274,11 +3336,17 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         private async Task LoadPanelStatesAsync()
         {
-            await this.Js.InvokeVoidAsync("localStorage.removeItem", ModelExpandedStorageKey);
-            await this.Js.InvokeVoidAsync("localStorage.removeItem", ContextExpandedStorageKey);
-            await this.Js.InvokeVoidAsync("localStorage.removeItem", KnowledgeExpandedStorageKey);
-            await this.Js.InvokeVoidAsync("localStorage.removeItem", GenSettingsExpandedStorageKey);
-
+            try
+            {
+                await this.Js.InvokeVoidAsync("localStorage.removeItem", ModelExpandedStorageKey);
+                await this.Js.InvokeVoidAsync("localStorage.removeItem", ContextExpandedStorageKey);
+                await this.Js.InvokeVoidAsync("localStorage.removeItem", KnowledgeExpandedStorageKey);
+                await this.Js.InvokeVoidAsync("localStorage.removeItem", GenSettingsExpandedStorageKey);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex);
+            }
             this.IsModelPanelExpanded = true;
             this.IsContextPanelExpanded = false;
             this.IsKnowledgePanelExpanded = false;

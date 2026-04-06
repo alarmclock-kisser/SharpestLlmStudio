@@ -58,7 +58,10 @@ namespace SharpestLlmStudio.Runtime
                 lock (this._serverStdout) { this._serverStdout.Clear(); }
 
                 // 2. Argumente zusammenbauen
-                var args = $"-m \"{request.ModelInfo.ModelFilePath}\" -ngl {request.GpuLayers} -c {request.ContextSize} -b {Math.Max(1, request.BatchSize)} -ub {Math.Max(1, request.UBatchSize)} --host {request.Host} --port {request.Port}";
+                // HIER WURDEN DIE GPU SPLIT ARGUMENTE HINZUGEFÜGT (-ts und -sm)
+                // -ts 4,3 (für 16GB auf GPU0 und 12GB auf GPU1. Falls umgekehrt erkannt, ändere dies zu -ts 3,4)
+                // -sm layer (damit beide Karten Pipeline-Parallelismus nutzen)
+                var args = $"-m \"{request.ModelInfo.ModelFilePath}\" -ngl {request.GpuLayers} -ts 4,3 -sm layer -c {request.ContextSize} -b {Math.Max(1, request.BatchSize)} -ub {Math.Max(1, request.UBatchSize)} --host {request.Host} --port {request.Port}";
 
                 // For Omni models, always include vision/encoder gguf as --mmproj if available
                 bool shouldIncludeMmproj = request.IncludeMmproj || request.ModelInfo.IsOmni;
