@@ -28,6 +28,24 @@ window.sharpestNavMenu = {
         URL.revokeObjectURL(url);
     },
 
+    hasFunction: function (path) {
+        if (!path || typeof path !== 'string') {
+            return false;
+        }
+
+        const segments = path.split('.');
+        let current = window;
+        for (const segment of segments) {
+            if (!current || !(segment in current)) {
+                return false;
+            }
+
+            current = current[segment];
+        }
+
+        return typeof current === 'function';
+    },
+
     scrollToBottom: function (elementId) {
         const element = document.getElementById(elementId);
         if (!element) {
@@ -59,6 +77,34 @@ window.sharpestNavMenu = {
             }
             element.click();
         }
+    },
+
+    isElementFocused: function (elementId) {
+        const element = document.getElementById(elementId);
+        return !!element && document.activeElement === element;
+    },
+
+    focusElementIfExists: function (elementId) {
+        const element = document.getElementById(elementId);
+        if (!element || typeof element.focus !== 'function') {
+            return false;
+        }
+
+        try {
+            element.focus({ preventScroll: true });
+        } catch {
+            element.focus();
+        }
+
+        try {
+            if (typeof element.value === 'string' && typeof element.setSelectionRange === 'function') {
+                const len = element.value.length;
+                element.setSelectionRange(len, len);
+            }
+        } catch {
+        }
+
+        return document.activeElement === element;
     },
 
     setupPromptEnter: function (elementId, dotNetRef) {
@@ -710,5 +756,309 @@ window.sharpestNavMenu = {
         btn.addEventListener('touchstart', (e) => { e.preventDefault(); onDown(e); }, { passive: false });
         btn.addEventListener('touchend', (e) => { e.preventDefault(); onUp(e); });
         btn.addEventListener('touchcancel', onLeave);
+    },
+
+    setupClickerLoopEscape: function (dotNetRef, isActive) {
+        window._sharpestClickerLoopDotNetRef = dotNetRef;
+        window._sharpestClickerLoopEscapeActive = !!isActive;
+
+        if (window._sharpestClickerLoopEscapeBound) {
+            return;
+        }
+
+        window._sharpestClickerLoopEscapeBound = true;
+        document.addEventListener('keydown', function (e) {
+            if (!window._sharpestClickerLoopEscapeActive || e.key !== 'Escape') {
+                return;
+            }
+
+            if (document.getElementById('sharpest-clicker-confirm-popup')) {
+                return;
+            }
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            const ref = window._sharpestClickerLoopDotNetRef;
+            if (ref) {
+                ref.invokeMethodAsync('OnClickerEscapePressed');
+            }
+        }, true);
+    },
+
+    cancelClickerProtectedZoneSelection: function () {
+        if (window._sharpestClickerZoneSelectionCleanup) {
+            try { window._sharpestClickerZoneSelectionCleanup(); } catch { }
+            window._sharpestClickerZoneSelectionCleanup = null;
+        }
+    },
+
+    armClickerProtectedZoneSelection: function (stageId, dotNetRef) {
+        const stage = document.getElementById(stageId);
+        if (!stage) {
+            return false;
+        }
+
+        window.sharpestNavMenu.cancelClickerProtectedZoneSelection();
+
+        const clamp = function (value, min, max) {
+            return Math.min(max, Math.max(min, value));
+        };
+
+        const getRelativePoint = function (clientX, clientY) {
+            const rect = stage.getBoundingClientRect();
+            return {
+                rect,
+                x: clamp(clientX - rect.left, 0, rect.width),
+                y: clamp(clientY - rect.top, 0, rect.height)
+            };
+        };
+
+        const draft = document.createElement('div');
+        draft.className = 'clicker-protected-zone-draft';
+        draft.style.display = 'none';
+        stage.appendChild(draft);
+        stage.classList.add('clicker-zone-selection-active');
+
+        let pointerId = null;
+        let startX = 0;
+        let startY = 0;
+        let dragging = false;
+
+        const updateDraft = function (x1, y1, x2, y2) {
+            const left = Math.min(x1, x2);
+            const top = Math.min(y1, y2);
+            const width = Math.max(1, Math.abs(x2 - x1));
+            const height = Math.max(1, Math.abs(y2 - y1));
+
+            draft.style.display = 'block';
+            draft.style.left = `${left}px`;
+            draft.style.top = `${top}px`;
+            draft.style.width = `${width}px`;
+            draft.style.height = `${height}px`;
+        };
+
+        const cleanup = function () {
+            document.removeEventListener('pointermove', onPointerMove, true);
+            document.removeEventListener('pointerup', onPointerUp, true);
+            document.removeEventListener('keydown', onKeyDown, true);
+            stage.removeEventListener('pointerdown', onPointerDown, true);
+
+            if (pointerId !== null && stage.releasePointerCapture) {
+                try { stage.releasePointerCapture(pointerId); } catch { }
+            }
+
+            stage.classList.remove('clicker-zone-selection-active');
+            if (draft.parentElement) {
+                draft.remove();
+            }
+
+            if (window._sharpestClickerZoneSelectionCleanup === cleanup) {
+                window._sharpestClickerZoneSelectionCleanup = null;
+            }
+        };
+
+        const finalize = function (x1, y1, x2, y2, treatAsPoint) {
+            const rect = stage.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) {
+                cleanup();
+                return;
+            }
+
+            let left = Math.min(x1, x2);
+            let top = Math.min(y1, y2);
+            let right = Math.max(x1, x2);
+            let bottom = Math.max(y1, y2);
+
+            if (treatAsPoint || (Math.abs(right - left) < 6 && Math.abs(bottom - top) < 6)) {
+                const halfWidth = Math.max(12, rect.width * 0.03);
+                const halfHeight = Math.max(12, rect.height * 0.03);
+                const centerX = left;
+                const centerY = top;
+                left = clamp(centerX - halfWidth, 0, rect.width);
+                right = clamp(centerX + halfWidth, 0, rect.width);
+                top = clamp(centerY - halfHeight, 0, rect.height);
+                bottom = clamp(centerY + halfHeight, 0, rect.height);
+            }
+
+            const normalizedLeft = clamp(Math.round((left / rect.width) * 1000), 0, 999);
+            const normalizedTop = clamp(Math.round((top / rect.height) * 1000), 0, 999);
+            const normalizedRight = clamp(Math.round((right / rect.width) * 1000), normalizedLeft + 1, 1000);
+            const normalizedBottom = clamp(Math.round((bottom / rect.height) * 1000), normalizedTop + 1, 1000);
+
+            cleanup();
+
+            if (dotNetRef) {
+                dotNetRef.invokeMethodAsync(
+                    'OnClickerProtectedZoneSelected',
+                    normalizedLeft,
+                    normalizedTop,
+                    Math.max(1, normalizedRight - normalizedLeft),
+                    Math.max(1, normalizedBottom - normalizedTop));
+            }
+        };
+
+        const onPointerDown = function (e) {
+            if (e.button !== 0) {
+                return;
+            }
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            const point = getRelativePoint(e.clientX, e.clientY);
+            pointerId = e.pointerId;
+            startX = point.x;
+            startY = point.y;
+            dragging = true;
+            updateDraft(startX, startY, startX, startY);
+
+            if (stage.setPointerCapture) {
+                try { stage.setPointerCapture(pointerId); } catch { }
+            }
+        };
+
+        const onPointerMove = function (e) {
+            if (!dragging) {
+                return;
+            }
+
+            e.preventDefault();
+
+            const point = getRelativePoint(e.clientX, e.clientY);
+            updateDraft(startX, startY, point.x, point.y);
+        };
+
+        const onPointerUp = function (e) {
+            if (!dragging) {
+                return;
+            }
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            dragging = false;
+            const point = getRelativePoint(e.clientX, e.clientY);
+            const treatAsPoint = Math.abs(point.x - startX) < 6 && Math.abs(point.y - startY) < 6;
+            finalize(startX, startY, point.x, point.y, treatAsPoint);
+        };
+
+        const onKeyDown = function (e) {
+            if (e.key !== 'Escape') {
+                return;
+            }
+
+            e.preventDefault();
+            e.stopPropagation();
+            cleanup();
+
+            if (dotNetRef) {
+                dotNetRef.invokeMethodAsync('OnClickerProtectedZoneSelectionCanceled');
+            }
+        };
+
+        window._sharpestClickerZoneSelectionCleanup = cleanup;
+        stage.addEventListener('pointerdown', onPointerDown, true);
+        document.addEventListener('pointermove', onPointerMove, true);
+        document.addEventListener('pointerup', onPointerUp, true);
+        document.addEventListener('keydown', onKeyDown, true);
+        return true;
+    },
+
+    dismissClickerConfirmation: function () {
+        if (window._sharpestClickerConfirmCleanup) {
+            try { window._sharpestClickerConfirmCleanup(); } catch { }
+            window._sharpestClickerConfirmCleanup = null;
+        }
+    },
+
+    awaitClickerConfirmation: function (screenX, screenY, isLoopRunning) {
+        window.sharpestNavMenu.dismissClickerConfirmation();
+
+        if (!window._sharpestClickerMouseTrackerBound) {
+            window._sharpestClickerMouseTrackerBound = true;
+            window._sharpestClickerMousePos = { x: Math.max(16, Number(screenX) || 16), y: Math.max(16, Number(screenY) || 16) };
+            window.addEventListener('mousemove', function (e) {
+                window._sharpestClickerMousePos = { x: e.clientX, y: e.clientY };
+            }, { passive: true });
+        }
+
+        return new Promise((resolve) => {
+            const mouse = window._sharpestClickerMousePos || { x: Number(screenX) || 24, y: Number(screenY) || 24 };
+            const popup = document.createElement('div');
+            popup.id = 'sharpest-clicker-confirm-popup';
+            popup.style.position = 'fixed';
+            popup.style.zIndex = '100000';
+            popup.style.left = '0px';
+            popup.style.top = '0px';
+            popup.style.maxWidth = '320px';
+            popup.style.padding = '10px 12px';
+            popup.style.borderRadius = '10px';
+            popup.style.border = '1px solid rgba(255,255,255,0.18)';
+            popup.style.background = 'rgba(24,24,28,0.96)';
+            popup.style.color = '#f5f5f5';
+            popup.style.boxShadow = '0 14px 36px rgba(0,0,0,0.45)';
+            popup.style.fontSize = '13px';
+            popup.style.lineHeight = '1.35';
+            popup.style.pointerEvents = 'none';
+            popup.innerHTML = `
+                <div style="font-weight:700;margin-bottom:6px;">Confirm Click</div>
+                <div style="opacity:0.92;">Target: ${screenX}, ${screenY}</div>
+                <div style="margin-top:6px;opacity:0.82;">Enter / Space = confirm</div>
+                <div style="opacity:0.82;">Any other key = deny this click</div>
+                <div style="opacity:0.82;">Esc = ${isLoopRunning ? 'stop loop' : 'deny'}</div>`;
+
+            document.body.appendChild(popup);
+
+            const rect = popup.getBoundingClientRect();
+            let left = mouse.x + 18;
+            let top = mouse.y + 18;
+            if (left + rect.width > window.innerWidth - 8) {
+                left = Math.max(8, mouse.x - rect.width - 18);
+            }
+            if (top + rect.height > window.innerHeight - 8) {
+                top = Math.max(8, mouse.y - rect.height - 18);
+            }
+            popup.style.left = `${left}px`;
+            popup.style.top = `${top}px`;
+
+            let done = false;
+            const finalize = function (result) {
+                if (done) return;
+                done = true;
+                cleanup();
+                resolve(result);
+            };
+
+            const onKeyDown = function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+
+                if (e.key === 'Enter' || e.key === ' ') {
+                    finalize('confirm');
+                    return;
+                }
+
+                if (e.key === 'Escape') {
+                    finalize(isLoopRunning ? 'cancel-loop' : 'deny');
+                    return;
+                }
+
+                finalize('deny');
+            };
+
+            const cleanup = function () {
+                document.removeEventListener('keydown', onKeyDown, true);
+                if (popup.parentElement) {
+                    popup.remove();
+                }
+                if (window._sharpestClickerConfirmCleanup === cleanup) {
+                    window._sharpestClickerConfirmCleanup = null;
+                }
+            };
+
+            window._sharpestClickerConfirmCleanup = cleanup;
+            document.addEventListener('keydown', onKeyDown, true);
+        });
     }
 };

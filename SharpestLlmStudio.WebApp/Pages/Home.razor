@@ -4,6 +4,7 @@
 @rendermode InteractiveServer
 
 @using Microsoft.AspNetCore.Components.Forms
+@using System.Globalization
 @using SharpestLlmStudio.Shared
 @using SharpestLlmStudio.WebApp.ViewModels
 @using static SharpestLlmStudio.WebApp.ViewModels.HomeViewModel
@@ -18,7 +19,7 @@
 
 <div class="page-wrapper">
     <div class="top-panels-container">
-        <div id="top-panels-content" class="top-panels-content" data-expanded="@VM.TopPanelsExpanded.ToString().ToLowerInvariant()" style="transition:max-height 0.28s ease;overflow:hidden;">
+        <div id="top-panels-content" class="top-panels-content" data-expanded="@VM.TopPanelsExpanded.ToString().ToLowerInvariant()" style="@VM.TopPanelsMaxHeightStyle">
             <RadzenStack Gap="1rem" class="home-shell top-panels-shell">
             <RadzenCard class="management-tabs-card">
                 <div class="management-tab-header">
@@ -27,6 +28,7 @@
                     <button type="button" class="management-tab-button @(_managementTabIndex == 2 ? "active" : null)" @onclick="() => OnManagementTabClick(2)">Knowledge Base</button>
                     <button type="button" class="management-tab-button @(_managementTabIndex == 3 ? "active" : null)" @onclick="() => OnManagementTabClick(3)">Speech-to-Text</button>
                     <button type="button" class="management-tab-button @(_managementTabIndex == 4 ? "active" : null)" @onclick="() => OnManagementTabClick(4)">JSON + Image</button>
+                    <button type="button" class="management-tab-button @(_managementTabIndex == 5 ? "active" : null)" @onclick="() => OnManagementTabClick(5)">Clicker</button>
                 </div>
 
                 <div class="management-tab-body">
@@ -164,6 +166,220 @@
                                 {
                                     <div style="width:100%;height:240px;display:flex;align-items:center;justify-content:center;border:1px dashed #ccc;color:#888;">Rendered image will appear here</div>
                                 }
+                            </div>
+                        </RadzenStack>
+                    }
+                    else if (_managementTabIndex == 5)
+                    {
+                        <RadzenStack Gap="0.75rem" class="collapsible-inner clicker-panel">
+                            <RadzenText TextStyle="TextStyle.Body2" Text="Mark a target window, let the model analyze the screenshot, then perform the returned pointer action. Supported actions include click, doubleclick, mouse down, and mouse up for drag/drop flows. The preferred response format is JSON with point_2d in the 0..1000 range plus an optional action field." />
+
+                            <RadzenFormField Text="Clicker Instructions" Variant="Variant.Outlined">
+                                <ChildContent>
+                                    <RadzenTextArea @bind-Value="VM.ClickerInstructions" Rows="5" Style="width:100%;" />
+                                </ChildContent>
+                            </RadzenFormField>
+
+                            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.75rem" Wrap="FlexWrap.Wrap">
+                                <RadzenFormField Text="Mark Delay (s)" Variant="Variant.Outlined">
+                                    <ChildContent>
+                                        <RadzenNumeric @bind-Value="VM.ClickerWindowMarkDelaySeconds" TValue="int" Min="1" Max="15" Step="1" Style="width:120px;" />
+                                    </ChildContent>
+                                </RadzenFormField>
+
+                                <RadzenFormField Text="Loop Interval (ms)" Variant="Variant.Outlined">
+                                    <ChildContent>
+                                        <RadzenNumeric @bind-Value="VM.ClickerLoopIntervalMs" TValue="int" Min="250" Max="60000" Step="250" Style="width:140px;" />
+                                    </ChildContent>
+                                </RadzenFormField>
+
+                                <RadzenFormField Text="Preview Scale (%)" Variant="Variant.Outlined">
+                                    <ChildContent>
+                                        <RadzenNumeric @bind-Value="VM.ClickerPreviewScalePercent" TValue="int" Min="20" Max="100" Step="5" Style="width:140px;" />
+                                    </ChildContent>
+                                </RadzenFormField>
+
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.ClickerIncludeWindowChrome" />
+                                    <RadzenLabel Text="Include window frame/title bar in screenshot and mapping" />
+                                </RadzenStack>
+
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.ClickerShowPreviewMarker" />
+                                    <RadzenLabel Text="Show high-contrast target marker in screenshot preview" />
+                                </RadzenStack>
+
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.ClickerUseBackgroundClick" />
+                                    <RadzenLabel Text="Click in target window without moving mouse or stealing focus" />
+                                </RadzenStack>
+
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.ClickerActivateWindowBeforeCapture" />
+                                    <RadzenLabel Text="Activate window before capture / click" />
+                                </RadzenStack>
+
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.ClickerDryRun" />
+                                    <RadzenLabel Text="Dry run only" />
+                                </RadzenStack>
+
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.ClickerRequirePointInsideWindow" />
+                                    <RadzenLabel Text="Require target inside marked window" />
+                                </RadzenStack>
+
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.ClickerConfirmBeforeClick" />
+                                    <RadzenLabel Text="Confirm before real click (Enter/Space confirm, Esc stops loop)" />
+                                </RadzenStack>
+
+                                <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem">
+                                    <RadzenCheckBox TValue="bool" @bind-Value="VM.ClickerUseChatInputAsLiveNote" />
+                                    <RadzenLabel Text="Use current chat input as live note during looping" />
+                                </RadzenStack>
+                            </RadzenStack>
+
+                            @if (VM.ClickerUseChatInputAsLiveNote)
+                            {
+                                <RadzenText TextStyle="TextStyle.Caption" Text="The bottom chat input stays editable during looping. Its current content is included as a live note for the next Clicker iteration." />
+                            }
+
+                            @if (VM.IsClickerLoopRunning)
+                            {
+                                <RadzenText TextStyle="TextStyle.Caption" Text="Press Esc at any time to stop the running loop." />
+                            }
+
+                            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.6rem" Wrap="FlexWrap.Wrap">
+                                <RadzenButton Text="Mark Active Window" Icon="filter_center_focus" ButtonStyle="ButtonStyle.Info" Disabled="@(VM.IsClickerBusy || VM.IsGenerating || VM.IsClickerProtectedZoneSelectionActive)" Click="@VM.MarkClickerWindowAsync" />
+                                <RadzenButton Text="Clear Window" Icon="close" ButtonStyle="ButtonStyle.Light" Disabled="@(VM.IsClickerBusy)" Click="@VM.ClearClickerWindow" />
+                                <RadzenButton Text="@(VM.IsClickerProtectedZoneSelectionActive ? "Cancel Zone Selection" : "Add Protected Zone")"
+                                              Icon="@(VM.IsClickerProtectedZoneSelectionActive ? "close" : "crop_free")"
+                                              ButtonStyle="ButtonStyle.Warning"
+                                              Disabled="@(VM.IsClickerBusy || VM.IsGenerating || _vmRef == null || string.IsNullOrWhiteSpace(VM.ClickerMarkedWindowLabel) || VM.ClickerMarkedWindowLabel == "No window marked.")"
+                                              Click="@(async () => { if (_vmRef != null) await VM.ToggleClickerProtectedZoneSelectionAsync(_vmRef); })" />
+                                <RadzenButton Text="Run Once" Icon="play_arrow" ButtonStyle="ButtonStyle.Primary" Disabled="@(VM.IsClickerBusy || VM.IsGenerating || VM.IsClickerProtectedZoneSelectionActive || !VM.IsLoaded)" Click="@VM.RunClickerOnceAsync" />
+                                <RadzenButton Text="@(VM.IsClickerLoopRunning ? "Stop Loop" : "Start Loop")" Icon="@(VM.IsClickerLoopRunning ? "stop" : "autorenew")" ButtonStyle="@(VM.IsClickerLoopRunning ? ButtonStyle.Danger : ButtonStyle.Success)" Disabled="@(VM.IsGenerating || VM.IsClickerProtectedZoneSelectionActive || !VM.IsLoaded)" Click="@VM.ToggleClickerLoopAsync" />
+                            </RadzenStack>
+
+                            <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.4rem" Wrap="FlexWrap.Wrap">
+                                <RadzenCheckBox TValue="bool" @bind-Value="VM.ClickerTellModelAboutProtectedZones" />
+                                <RadzenLabel Text="Tell the model about protected zones" />
+                            </RadzenStack>
+
+                            @if (VM.ClickerProtectedZoneCount > 0)
+                            {
+                                <div class="clicker-protected-zone-list">
+                                    <div class="clicker-preview-title">Protected Zones</div>
+                                    <div class="clicker-protected-zone-chip-wrap">
+                                        @foreach (var zone in VM.ClickerProtectedZones.ToList())
+                                        {
+                                            <span class="clicker-protected-zone-chip">
+                                                @if (_editingClickerProtectedZoneId == zone.Id)
+                                                {
+                                                    <input class="clicker-protected-zone-name-input"
+                                                           @bind="_editingClickerProtectedZoneName"
+                                                           @bind:event="oninput"
+                                                           @onblur="() => CommitProtectedZoneNameEdit(zone.Id)"
+                                                           @onkeydown="@(args => OnProtectedZoneNameKeyDown(zone.Id, args))"
+                                                           maxlength="80" />
+                                                }
+                                                else
+                                                {
+                                                    <button type="button" class="clicker-protected-zone-name-button" @ondblclick="() => BeginProtectedZoneNameEdit(zone)">
+                                                        @zone.Name <span class="clicker-protected-zone-scope">@zone.ScopeLabel</span>
+                                                    </button>
+                                                }
+                                                <button type="button" class="clicker-protected-zone-remove" @onclick="() => RemoveProtectedZone(zone.Id)">✕</button>
+                                            </span>
+                                        }
+                                    </div>
+                                </div>
+                            }
+
+                            <div class="clicker-status-grid">
+                                <div class="clicker-status-card">
+                                    <div class="clicker-status-title">Marked Window</div>
+                                    <div class="clicker-status-value">@VM.ClickerMarkedWindowLabel</div>
+                                </div>
+                                <div class="clicker-status-card">
+                                    <div class="clicker-status-title">Loop State</div>
+                                    <div class="clicker-status-value">@(VM.IsClickerLoopRunning ? "Running" : VM.IsClickerBusy ? "Working" : "Idle")</div>
+                                </div>
+                                <div class="clicker-status-card">
+                                    <div class="clicker-status-title">Iterations</div>
+                                    <div class="clicker-status-value">@VM.ClickerIterationCount</div>
+                                </div>
+                                <div class="clicker-status-card">
+                                    <div class="clicker-status-title">Last Parsed Point</div>
+                                    <div class="clicker-status-value">@(string.IsNullOrWhiteSpace(VM.ClickerLastParsedPoint) ? "n/a" : VM.ClickerLastParsedPoint)</div>
+                                </div>
+                                <div class="clicker-status-card">
+                                    <div class="clicker-status-title">Last Parsed Action</div>
+                                    <div class="clicker-status-value">@(string.IsNullOrWhiteSpace(VM.ClickerLastParsedAction) ? "n/a" : VM.ClickerLastParsedAction)</div>
+                                </div>
+                                <div class="clicker-status-card">
+                                    <div class="clicker-status-title">Target Screen Point</div>
+                                    <div class="clicker-status-value">@(string.IsNullOrWhiteSpace(VM.ClickerLastTargetScreenPoint) ? "n/a" : VM.ClickerLastTargetScreenPoint)</div>
+                                </div>
+                                <div class="clicker-status-card">
+                                    <div class="clicker-status-title">Confirmation</div>
+                                    <div class="clicker-status-value">@(string.IsNullOrWhiteSpace(VM.ClickerLastConfirmationOutcome) ? "n/a" : VM.ClickerLastConfirmationOutcome)</div>
+                                </div>
+                                <div class="clicker-status-card">
+                                    <div class="clicker-status-title">Reason</div>
+                                    <div class="clicker-status-value clicker-reason-text">@(string.IsNullOrWhiteSpace(VM.ClickerLastReason) ? "n/a" : VM.ClickerLastReason)</div>
+                                </div>
+                            </div>
+
+                            @if (VM.ClickerLastRunAtUtc.HasValue)
+                            {
+                                <RadzenText TextStyle="TextStyle.Caption" Text="@($"Last run: {VM.ClickerLastRunAtUtc.Value.ToLocalTime():HH:mm:ss}")" />
+                            }
+
+                            <div class="clicker-preview-grid">
+                                <div class="clicker-preview-panel">
+                                    <div class="clicker-preview-title">Latest Screenshot</div>
+                                    @if (!string.IsNullOrWhiteSpace(VM.ClickerScreenshotDataUrl))
+                                    {
+                                        <div class="clicker-preview-image-wrap">
+                                            <div id="clicker-preview-stage" class="clicker-preview-stage" style="width:@($"{VM.ClickerPreviewScalePercent}%");max-width:100%;">
+                                                <img src="@VM.ClickerScreenshotDataUrl" class="clicker-preview-image" style="width:100%;max-width:100%;" />
+                                                @foreach (var zone in VM.VisibleClickerProtectedZones)
+                                                {
+                                                    <div class="clicker-protected-zone-box"
+                                                         style="left:@ToCssPercent(zone.LeftPercent);top:@ToCssPercent(zone.TopPercent);width:@ToCssPercent(zone.WidthPercent);height:@ToCssPercent(zone.HeightPercent);"
+                                                         title="@($"Protected zone: {zone.Name}")"
+                                                         aria-hidden="true">
+                                                        <span class="clicker-protected-zone-box-label">@zone.Name</span>
+                                                    </div>
+                                                }
+                                                @if (VM.ClickerShowPreviewMarker && VM.HasClickerPreviewMarker)
+                                                {
+                                                    <div class="clicker-preview-marker"
+                                                         style="left:@ToCssPercent(VM.ClickerPreviewMarkerLeftPercent ?? 0.0);top:@ToCssPercent(VM.ClickerPreviewMarkerTopPercent ?? 0.0);"
+                                                         aria-hidden="true"></div>
+                                                }
+                                            </div>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div class="clicker-placeholder">No screenshot captured yet.</div>
+                                    }
+                                </div>
+
+                                <div class="clicker-preview-panel">
+                                    <div class="clicker-preview-title">Latest Model Reason</div>
+                                    <div class="clicker-reason-block">@(string.IsNullOrWhiteSpace(VM.ClickerLastReason) ? "No reason extracted yet." : VM.ClickerLastReason)</div>
+                                    <div class="clicker-preview-title">Latest Model Response</div>
+                                    <pre class="clicker-response-block">@(string.IsNullOrWhiteSpace(VM.ClickerLastResponse) ? "No response yet." : VM.ClickerLastResponse)</pre>
+                                    @if (!string.IsNullOrWhiteSpace(VM.ClickerLastNormalizedJson))
+                                    {
+                                        <div class="clicker-preview-title">Parsed JSON / Raw Parse Payload</div>
+                                        <pre class="clicker-response-block">@VM.ClickerLastNormalizedJson</pre>
+                                    }
+                                </div>
                             </div>
                         </RadzenStack>
                     }
@@ -700,6 +916,8 @@
     private int _managementTabIndex;
     private DotNetObjectReference<HomeViewModel>? _vmRef;
     private CancellationTokenSource? _renderCts;
+    private Guid? _editingClickerProtectedZoneId;
+    private string _editingClickerProtectedZoneName = string.Empty;
 
     private async Task OnManagementTabClick(int index)
     {
@@ -765,5 +983,59 @@
     private void OnViewModelStateChanged()
     {
         _ = InvokeAsync(StateHasChanged);
+    }
+
+    private void BeginProtectedZoneNameEdit(HomeViewModel.ClickerProtectedZone zone)
+    {
+        _editingClickerProtectedZoneId = zone.Id;
+        _editingClickerProtectedZoneName = zone.Name;
+    }
+
+    private void CommitProtectedZoneNameEdit(Guid zoneId)
+    {
+        if (_editingClickerProtectedZoneId != zoneId)
+        {
+            return;
+        }
+
+        VM.RenameClickerProtectedZone(zoneId, _editingClickerProtectedZoneName);
+        _editingClickerProtectedZoneId = null;
+        _editingClickerProtectedZoneName = string.Empty;
+    }
+
+    private void CancelProtectedZoneNameEdit(Guid zoneId)
+    {
+        if (_editingClickerProtectedZoneId != zoneId)
+        {
+            return;
+        }
+
+        _editingClickerProtectedZoneId = null;
+        _editingClickerProtectedZoneName = string.Empty;
+    }
+
+    private void OnProtectedZoneNameKeyDown(Guid zoneId, KeyboardEventArgs args)
+    {
+        if (args.Key == "Enter")
+        {
+            CommitProtectedZoneNameEdit(zoneId);
+            return;
+        }
+
+        if (args.Key == "Escape")
+        {
+            CancelProtectedZoneNameEdit(zoneId);
+        }
+    }
+
+    private void RemoveProtectedZone(Guid zoneId)
+    {
+        CancelProtectedZoneNameEdit(zoneId);
+        VM.RemoveClickerProtectedZone(zoneId);
+    }
+
+    private static string ToCssPercent(double value)
+    {
+        return value.ToString("0.###", CultureInfo.InvariantCulture) + "%";
     }
 }

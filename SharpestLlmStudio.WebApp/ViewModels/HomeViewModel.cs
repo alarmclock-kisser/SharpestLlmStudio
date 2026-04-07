@@ -7,6 +7,7 @@ using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Diagnostics;
+using SharpestLlmStudio.Monitoring;
 using SharpestLlmStudio.Shared;
 using SharpestLlmStudio.Runtime;
 using SharpestLlmStudio.Runtime.ONNX;
@@ -17,7 +18,7 @@ using System.Text.RegularExpressions;
 
 namespace SharpestLlmStudio.WebApp.ViewModels
 {
-    public class HomeViewModel : IDisposable
+    public partial class HomeViewModel : IDisposable
     {
         private Action? stateChangedListeners;
         private readonly LlamaCppClient Client;
@@ -667,7 +668,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 }
 
                 // preferred heights per tab (px). Tune as needed.
-                int[] preferred = new int[] { 520, 360, 520, 360, 620 };
+                int[] preferred = new int[] { 520, 360, 520, 360, 620, 680 };
                 int idx = Math.Clamp(this.ActiveManagementTabIndex, 0, preferred.Length - 1);
                 int height = preferred[idx];
                 // cap to viewport percentage if very tall
@@ -799,12 +800,13 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         private bool selectDefaultModelAfterReusedUnload;
 
 
-        public HomeViewModel(LlamaCppClient ApiClient, IJSRuntime js, WebAppSettings webAppSettings, OnnxWhisperService whisperService)
+        public HomeViewModel(LlamaCppClient ApiClient, IJSRuntime js, WebAppSettings webAppSettings, OnnxWhisperService whisperService, ScreenClicker screenClicker)
         {
             this.Client = ApiClient;
             this.Whisper = whisperService;
             this.Js = js;
             this.Settings = webAppSettings;
+            this.Clicker = screenClicker;
             this.AgentShowCommandWindow = this.Settings.AgentShowCommandWindow;
             this.AutoContinueAgentActions = this.Settings.AgentAutoContinue;
             this.AllowAllNonAdminCommands = this.Settings.AllowAllNonAdminCommands;
@@ -2719,6 +2721,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 await this.Js.InvokeVoidAsync("sharpestNavMenu.setupVerticalResizeHandle", TopPanelsResizeHandleElementId, TopPanelsContentElementId, 140, 900);
                 if (cancellationToken.IsCancellationRequested) return;
                 await this.Js.InvokeVoidAsync("sharpestNavMenu.setupMicButton", "micButton", vmRef, "audioFilePicker");
+                if (cancellationToken.IsCancellationRequested) return;
+                await this.TrySetupClickerLoopEscapeAsync(vmRef);
                 if (this.AutoScrollEnabled)
                 {
                     if (cancellationToken.IsCancellationRequested) return;
@@ -2746,6 +2750,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupThinkBlocks", ChatOutputElementId);
             if (cancellationToken.IsCancellationRequested) return;
             await this.Js.InvokeVoidAsync("sharpestNavMenu.setupMicButton", "micButton", vmRef, "audioFilePicker");
+            if (cancellationToken.IsCancellationRequested) return;
+            await this.TrySetupClickerLoopEscapeAsync(vmRef);
 
             if (this._panelStateLoaded)
             {
@@ -2765,6 +2771,23 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 this._lastChatMessageCount = this.ChatMessages.Count;
                 if (cancellationToken.IsCancellationRequested) return;
                 await this.Js.InvokeVoidAsync("sharpestNavMenu.autoScrollIfSticky", ChatOutputElementId);
+            }
+        }
+
+        private async Task TrySetupClickerLoopEscapeAsync(DotNetObjectReference<HomeViewModel> vmRef)
+        {
+            try
+            {
+                bool hasSetupFunction = await this.Js.InvokeAsync<bool>("sharpestNavMenu.hasFunction", "sharpestNavMenu.setupClickerLoopEscape");
+                if (!hasSetupFunction)
+                {
+                    return;
+                }
+
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.setupClickerLoopEscape", vmRef, this.IsClickerLoopRunning);
+            }
+            catch
+            {
             }
         }
 
@@ -3395,6 +3418,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 this.IsMicRecording = false;
             }
             this.Whisper.StopLiveMode();
+            this.DisposeClickerResources();
 
             GC.SuppressFinalize(this);
         }

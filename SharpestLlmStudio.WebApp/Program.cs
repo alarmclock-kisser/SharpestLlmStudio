@@ -1,4 +1,5 @@
 using Radzen;
+using SharpestLlmStudio.Monitoring;
 using SharpestLlmStudio.Runtime;
 using SharpestLlmStudio.Runtime.ONNX;
 using SharpestLlmStudio.Shared;
@@ -39,6 +40,8 @@ namespace SharpestLlmStudio.WebApp
             {
                 builder.Services.AddSingleton<GpuMonitor>();
             }
+
+            builder.Services.AddSingleton<ScreenClicker>();
 
             // ApiClient + WebAppSettings
             builder.Services.AddSingleton(webAppSettings);

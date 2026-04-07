@@ -49,6 +49,7 @@ namespace SharpestLlmStudio.Shared
         public bool AgentAutoContinue { get; set; } = true;
         public bool AllowAllNonAdminCommands { get; set; } = false;
         public bool AutoAllowWebSearch { get; set; } = true;
+        public string ClickerProtectedZoneModelWarning { get; set; } = string.Empty;
 
 
 
