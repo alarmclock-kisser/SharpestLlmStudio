@@ -83,6 +83,26 @@ namespace SharpestLlmStudio.Monitoring
             return GetForegroundWindow();
         }
 
+        public bool IsTaskbarOrShellWindow(nint handle)
+        {
+            if (handle == IntPtr.Zero)
+            {
+                return true;
+            }
+
+            string className = GetWindowClassName(handle);
+            if (string.IsNullOrWhiteSpace(className))
+            {
+                return false;
+            }
+
+            return className.Equals("Shell_TrayWnd", StringComparison.Ordinal)
+                || className.Equals("Shell_SecondaryTrayWnd", StringComparison.Ordinal)
+                || className.Equals("Progman", StringComparison.Ordinal)
+                || className.Equals("WorkerW", StringComparison.Ordinal)
+                || className.Equals("Shell_ExperienceHost", StringComparison.Ordinal);
+        }
+
         public bool TryRestoreForegroundWindow(nint handle)
         {
             if (handle == IntPtr.Zero || !IsWindow(handle))
@@ -235,6 +255,21 @@ namespace SharpestLlmStudio.Monitoring
 
                 await StaticLogger.LogAsync($"[ScreenClicker] Captured window screenshot: {filePath}");
                 return filePath;
+            }
+            catch (OperationCanceledException)
+            {
+                try
+                {
+                    if (File.Exists(filePath))
+                    {
+                        File.Delete(filePath);
+                    }
+                }
+                catch
+                {
+                }
+
+                return null;
             }
             catch (Exception ex)
             {
@@ -740,6 +775,28 @@ namespace SharpestLlmStudio.Monitoring
             this.ReleaseHeldKeyboard();
         }
 
+        public async Task<Point?> WaitForNextLeftClickAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
+        {
+            var started = DateTime.UtcNow;
+            bool wasDown = IsLeftButtonDown();
+
+            while (DateTime.UtcNow - started < timeout)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                bool isDown = IsLeftButtonDown();
+                if (wasDown && !isDown && GetCursorPos(out POINT point))
+                {
+                    return new Point(point.X, point.Y);
+                }
+
+                wasDown = isDown;
+                await Task.Delay(25, cancellationToken).ConfigureAwait(false);
+            }
+
+            return null;
+        }
+
         private static bool TryMapVirtualKey(string rawKey, out byte virtualKey)
         {
             virtualKey = 0;
@@ -787,6 +844,7 @@ namespace SharpestLlmStudio.Monitoring
                 "down" or "arrowdown" => AssignVirtualKey(VK_DOWN, out virtualKey),
                 "left" or "arrowleft" => AssignVirtualKey(VK_LEFT, out virtualKey),
                 "right" or "arrowright" => AssignVirtualKey(VK_RIGHT, out virtualKey),
+                "+" or "plus" => AssignVirtualKey(VK_ADD, out virtualKey),
                 _ => false
             };
         }
@@ -795,6 +853,52 @@ namespace SharpestLlmStudio.Monitoring
         {
             virtualKey = key;
             return true;
+        }
+
+        private static bool TryExecutePrintableKeyPress(MarkedWindowInfo window, string rawKey, bool useBackgroundInput)
+        {
+            char? printable = rawKey?.Trim() switch
+            {
+                "+" or "plus" => '+',
+                "-" or "minus" => '-',
+                _ => null
+            };
+
+            if (!printable.HasValue)
+            {
+                return false;
+            }
+
+            if (useBackgroundInput)
+            {
+                _ = PostMessage(window.Handle, WM_CHAR, (IntPtr)printable.Value, IntPtr.Zero);
+                return true;
+            }
+
+            short vk = VkKeyScan(printable.Value);
+            if (vk == -1)
+            {
+                return false;
+            }
+
+            byte keyCode = (byte)(vk & 0xFF);
+            byte shiftState = (byte)((vk >> 8) & 0xFF);
+            if ((shiftState & 1) != 0) keybd_event(VK_SHIFT, 0, 0, UIntPtr.Zero);
+            if ((shiftState & 2) != 0) keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
+            if ((shiftState & 4) != 0) keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
+
+            keybd_event(keyCode, 0, 0, UIntPtr.Zero);
+            keybd_event(keyCode, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+
+            if ((shiftState & 4) != 0) keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            if ((shiftState & 2) != 0) keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            if ((shiftState & 1) != 0) keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            return true;
+        }
+
+        private static bool IsLeftButtonDown()
+        {
+            return (GetAsyncKeyState(VK_LBUTTON_MOUSE) & 0x8000) != 0;
         }
 
         private bool TryForegroundPointerAction(MarkedWindowInfo window, PointerAction action, Point screenPoint)
@@ -1146,6 +1250,13 @@ namespace SharpestLlmStudio.Monitoring
             var sb = new StringBuilder(Math.Max(256, length + 1));
             _ = GetWindowText(hwnd, sb, sb.Capacity);
             return sb.ToString().Trim();
+        }
+
+        private static string GetWindowClassName(nint hwnd)
+        {
+            var sb = new StringBuilder(256);
+            int len = GetClassName(hwnd, sb, sb.Capacity);
+            return len > 0 ? sb.ToString() : string.Empty;
         }
 
         private IEnumerable<string> EnumerateJsonCandidates(string text)
@@ -1566,6 +1677,7 @@ namespace SharpestLlmStudio.Monitoring
         private const byte VK_MENU = 0x12;
         private const byte VK_ESCAPE = 0x1B;
         private const byte VK_SPACE = 0x20;
+        private const byte VK_ADD = 0x6B;
         private const byte VK_PRIOR = 0x21;
         private const byte VK_NEXT = 0x22;
         private const byte VK_END = 0x23;
@@ -1577,6 +1689,7 @@ namespace SharpestLlmStudio.Monitoring
         private const byte VK_INSERT = 0x2D;
         private const byte VK_DELETE = 0x2E;
         private const byte VK_LWIN = 0x5B;
+        private const int VK_LBUTTON_MOUSE = 0x01;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT
@@ -1649,6 +1762,9 @@ namespace SharpestLlmStudio.Monitoring
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern int GetWindowTextLength(nint hWnd);
 
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetClassName(nint hWnd, StringBuilder lpClassName, int nMaxCount);
+
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool IsWindow(nint hWnd);
@@ -1687,6 +1803,9 @@ namespace SharpestLlmStudio.Monitoring
 
         [DllImport("user32.dll")]
         private static extern short VkKeyScan(char ch);
+
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
 
         [DllImport("user32.dll")]
         private static extern int GetSystemMetrics(int nIndex);

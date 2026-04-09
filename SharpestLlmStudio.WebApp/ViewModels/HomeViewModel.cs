@@ -1642,16 +1642,33 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                         this.Client.AddUserMessage(webChatPrompt);
                     }
 
-                    string assistantStatus = string.IsNullOrWhiteSpace(this.WebChatConnectionStatus)
-                        ? $"Prompt prepared for {this.SelectedWebChatProviderText}."
-                        : this.WebChatConnectionStatus;
+                    try 
+                    {
+                        if (this.webChatClipboardStage == WebChatClipboardStage.Text)
+                        {
+                            await RunOnStaThreadAsync(() => System.Windows.Forms.Clipboard.SetText(webChatPrompt));
+                        }
+                    } 
+                    catch { }
+
+                    string assistantStatus = $"[Web chat] Prompt is ready in your clipboard.\n\n" +
+                                             $"Step 1: Go to your browser ({this.SelectedWebChatProviderText}).\n" +
+                                             $"Step 2: Paste the prompt (Ctrl+V) and hit send.\n" +
+                                             $"Step 3: Wait for the answer, mark it, and COPY it (Ctrl+C).\n\n" +
+                                             $"Auto-Import is watching your clipboard and will automatically add the copied answer here as a response.";
                     this.QueuePendingWebChatAssistantMessage(assistantStatus);
+                    this.StartWebChatClipboardWatcher();
 
                     this.UserInput = string.Empty;
-                    this.WebChatConnectionStatus = $"Prompt prepared for {this.SelectedWebChatProviderText}. Waiting for response import or Clicker capture.";
+                    this.WebChatConnectionStatus = $"Prompt copied for {this.SelectedWebChatProviderText}. Waiting for clipboard auto-import.";
                     this.LastActionMessage = $"Prompt prepared for {this.SelectedWebChatProviderText}.";
                     this.RequestUiRefresh();
                     await this.ScrollChatToBottomAsync();
+
+                    if (this.clickerMarkedWindow != null && !this.IsClickerLoopRunning && this.IsLoaded)
+                    {
+                        _ = this.ToggleClickerLoopAsync();
+                    }
                 }
 
                 return;

@@ -344,11 +344,7 @@ Example (pointer + keyboard):
                             <details>
                                 <summary style="cursor:pointer;user-select:none;">Timing and preview scaling</summary>
                                 <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.End" Gap="0.75rem" Wrap="FlexWrap.Wrap" style="margin-top:0.5rem;">
-                                    <RadzenFormField Text="Mark Delay (s)" Variant="Variant.Outlined">
-                                        <ChildContent>
-                                            <RadzenNumeric @bind-Value="VM.ClickerWindowMarkDelaySeconds" TValue="int" Min="1" Max="15" Step="1" Style="width:120px;" />
-                                        </ChildContent>
-                                    </RadzenFormField>
+                                    <RadzenText TextStyle="TextStyle.Caption" Text="Mark Window now uses next-click focus detection (no fixed wait delay)." />
 
                                     <RadzenFormField Text="Loop Interval (ms)" Variant="Variant.Outlined">
                                         <ChildContent>
@@ -374,7 +370,7 @@ Example (pointer + keyboard):
                                 <summary style="cursor:pointer;user-select:none;">Execution options</summary>
                                 <RadzenStack Gap="0.45rem" style="margin-top:0.5rem;">
                                     <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem">
-                                        <RadzenCheckBox TValue="bool" @bind-Value="VM.ClickerIncludeWindowChrome" />
+                                        <RadzenCheckBox TValue="bool" Value="@VM.ClickerIncludeWindowChrome" Change="@(async (args) => await VM.OnClickerIncludeWindowChromeChangedAsync((bool)args))" />
                                         <RadzenLabel Text="Include window frame/title bar in screenshot and mapping" />
                                     </RadzenStack>
                                     <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem">
@@ -423,6 +419,10 @@ Example (pointer + keyboard):
                                         <RadzenCheckBox TValue="bool" @bind-Value="VM.ClickerAllowModelQuestions" />
                                         <RadzenLabel Text="Allow the model to ask the user a question dialog with buttons and optional free-text input when a decision is required" />
                                     </RadzenStack>
+                                    <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem">
+                                        <RadzenCheckBox TValue="bool" @bind-Value="VM.ClickerSafeMode" />
+                                        <RadzenLabel Text="Safe Mode: one-shot ultra-compact Clicker prompt (128px image cap, no extra context)" />
+                                    </RadzenStack>
                                     @if (!string.IsNullOrWhiteSpace(VM.ClickerLastErrorFeedback))
                                     {
                                         <div class="clicker-reason-block">@VM.ClickerLastErrorFeedback</div>
@@ -434,29 +434,29 @@ Example (pointer + keyboard):
                                 <summary style="cursor:pointer;user-select:none;">Interaction region</summary>
                                 <RadzenStack Gap="0.45rem" style="margin-top:0.5rem;">
                                     <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem">
-                                        <RadzenCheckBox TValue="bool" @bind-Value="VM.ClickerLimitInteractionRegion" />
+                                        <RadzenCheckBox TValue="bool" Value="@VM.ClickerLimitInteractionRegion" Change="@(async (args) => await VM.OnClickerLimitInteractionRegionChangedAsync((bool)args))" />
                                         <RadzenLabel Text="Limit screenshot, mapping, and interaction to a custom rectangle inside the marked window" />
                                     </RadzenStack>
                                     <RadzenText TextStyle="TextStyle.Caption" Text="@($"Active region: {VM.ClickerInteractionRegionLabel}")" />
                                     <RadzenStack Orientation="Orientation.Horizontal" Gap="0.75rem" Wrap="FlexWrap.Wrap">
                                         <RadzenFormField Text="Min X" Variant="Variant.Outlined">
                                             <ChildContent>
-                                                <RadzenNumeric @bind-Value="VM.ClickerInteractionMinX" TValue="int" Min="0" Max="10000" Step="1" Style="width:120px;" />
+                                                <RadzenNumeric Value="@VM.ClickerInteractionMinX" ValueChanged="@(async (int v) => await VM.OnClickerInteractionRegionChangedAsync("MinX", v))" TValue="int" Min="0" Max="10000" Step="1" Style="width:120px;" />
                                             </ChildContent>
                                         </RadzenFormField>
                                         <RadzenFormField Text="Min Y" Variant="Variant.Outlined">
                                             <ChildContent>
-                                                <RadzenNumeric @bind-Value="VM.ClickerInteractionMinY" TValue="int" Min="0" Max="10000" Step="1" Style="width:120px;" />
+                                                <RadzenNumeric Value="@VM.ClickerInteractionMinY" ValueChanged="@(async (int v) => await VM.OnClickerInteractionRegionChangedAsync("MinY", v))" TValue="int" Min="0" Max="10000" Step="1" Style="width:120px;" />
                                             </ChildContent>
                                         </RadzenFormField>
                                         <RadzenFormField Text="Max X" Variant="Variant.Outlined">
                                             <ChildContent>
-                                                <RadzenNumeric @bind-Value="VM.ClickerInteractionMaxX" TValue="int" Min="0" Max="10000" Step="1" Style="width:120px;" />
+                                                <RadzenNumeric Value="@VM.ClickerInteractionMaxX" ValueChanged="@(async (int v) => await VM.OnClickerInteractionRegionChangedAsync("MaxX", v))" TValue="int" Min="0" Max="10000" Step="1" Style="width:120px;" />
                                             </ChildContent>
                                         </RadzenFormField>
                                         <RadzenFormField Text="Max Y" Variant="Variant.Outlined">
                                             <ChildContent>
-                                                <RadzenNumeric @bind-Value="VM.ClickerInteractionMaxY" TValue="int" Min="0" Max="10000" Step="1" Style="width:120px;" />
+                                                <RadzenNumeric Value="@VM.ClickerInteractionMaxY" ValueChanged="@(async (int v) => await VM.OnClickerInteractionRegionChangedAsync("MaxY", v))" TValue="int" Min="0" Max="10000" Step="1" Style="width:120px;" />
                                             </ChildContent>
                                         </RadzenFormField>
                                     </RadzenStack>
@@ -625,6 +625,15 @@ Example (pointer + keyboard):
                                                          title="@($"Protected zone: {zone.Name}")"
                                                          aria-hidden="true">
                                                         <span class="clicker-protected-zone-box-label">@zone.Name</span>
+                                                    </div>
+                                                }
+                                                @if (VM.ShowClickerInteractionZoneOverlay)
+                                                {
+                                                    <div class="clicker-interaction-zone-box"
+                                                         style="left:@ToCssPercent(VM.ClickerInteractionZoneLeftPercent);top:@ToCssPercent(VM.ClickerInteractionZoneTopPercent);width:@ToCssPercent(VM.ClickerInteractionZoneWidthPercent);height:@ToCssPercent(VM.ClickerInteractionZoneHeightPercent);"
+                                                         title="Interaction region"
+                                                         aria-hidden="true">
+                                                        <span class="clicker-interaction-zone-box-label">Interaction zone</span>
                                                     </div>
                                                 }
                                                 @if (VM.ClickerShowPreviewMarker && VM.HasClickerPreviewMarker)

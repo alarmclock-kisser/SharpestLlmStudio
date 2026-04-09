@@ -116,14 +116,30 @@ namespace SharpestLlmStudio.Runtime
                 {
                     while (retryCount <= maxRetries)
                     {
-                        var payload = this.BuildChatCompletionPayload(request, normalizedImages);
+                        // For local multimodal requests, use the /completion endpoint with image_data
+                        // to bypass the Jinja template parser that chokes on base64 data URLs.
+                        bool useLocalCompletion = !isRemoteMode && normalizedImages.Count > 0;
+                        if (useLocalCompletion && retryCount == 0)
+                        {
+                            await StaticLogger.LogAsync($"[LlamaCpp] Using local /completion endpoint for multimodal request ({normalizedImages.Count} image(s)).");
+                        }
+                        var payload = useLocalCompletion
+                            ? this.BuildLocalCompletionPayload(request, normalizedImages)
+                            : this.BuildChatCompletionPayload(request, normalizedImages);
+                        string promptEstimate = useLocalCompletion
+                            ? (payload["prompt"]?.GetValue<string>() ?? "")
+                            : (payload["messages"]?.ToJsonString() ?? "");
                         completed = false;
 
                         try
                         {
                             if (request.Stream)
                             {
-                                await foreach (var chunk in this.StreamChatCompletionChunksAsync(payload, cancellationToken))
+                                IAsyncEnumerable<string> chunks = useLocalCompletion
+                                    ? this.StreamLocalCompletionChunksAsync(payload, cancellationToken)
+                                    : this.StreamChatCompletionChunksAsync(payload, cancellationToken);
+
+                                await foreach (var chunk in chunks)
                                 {
                                     this.TouchServerActivity();
                                     assistantText += chunk;
@@ -138,14 +154,16 @@ namespace SharpestLlmStudio.Runtime
                                         }
 
                                         this.LastGenerationStats.TotalTokensGenerated = CountRoughTokens(assistantText);
-                                        this.LastGenerationStats.TotalContextTokens = CountRoughTokens(payload["messages"]?.ToJsonString() ?? "") + CountRoughTokens(assistantText);
+                                        this.LastGenerationStats.TotalContextTokens = CountRoughTokens(promptEstimate) + CountRoughTokens(assistantText);
                                         this.LastGenerationStats.GenerationFinished = null;
                                     }
                                 }
                             }
                             else
                             {
-                                assistantText = await this.GenerateSingleChatCompletionAsync(payload, cancellationToken);
+                                assistantText = useLocalCompletion
+                                    ? await this.GenerateLocalCompletionAsync(payload, cancellationToken)
+                                    : await this.GenerateSingleChatCompletionAsync(payload, cancellationToken);
                                 this.TouchServerActivity();
 
                                 lock (this._generationStatsLock)
@@ -156,7 +174,7 @@ namespace SharpestLlmStudio.Runtime
                                     }
 
                                     this.LastGenerationStats.TotalTokensGenerated = CountRoughTokens(assistantText);
-                                    this.LastGenerationStats.TotalContextTokens = CountRoughTokens(payload["messages"]?.ToJsonString() ?? "") + CountRoughTokens(assistantText);
+                                    this.LastGenerationStats.TotalContextTokens = CountRoughTokens(promptEstimate) + CountRoughTokens(assistantText);
                                 }
 
                                 if (!string.IsNullOrEmpty(assistantText))
@@ -466,6 +484,185 @@ namespace SharpestLlmStudio.Runtime
             });
 
             return contentArray;
+        }
+
+        /// <summary>
+        /// Builds a payload for the llama-server <c>/completion</c> endpoint with <c>image_data</c>.
+        /// This bypasses the Jinja template rendering in <c>/v1/chat/completions</c> which fails
+        /// with "Failed to parse input" when base64 data URLs are embedded in multimodal content arrays.
+        /// </summary>
+        private JsonObject BuildLocalCompletionPayload(LlamaGenerationRequest request, List<string> normalizedImages)
+        {
+            // Build a ChatML-style prompt manually with [img-N] placeholders
+            var sb = new StringBuilder();
+
+            if (!string.IsNullOrWhiteSpace(request.SystemPrompt))
+            {
+                sb.Append("<|im_start|>system\n");
+                sb.Append(request.SystemPrompt);
+                sb.Append("<|im_end|>\n");
+            }
+
+            if (!request.Isolated && request.IncludeConversationHistory)
+            {
+                lock (this._conversationLock)
+                {
+                    foreach (var msg in this.ConversationMessages.Where(m => !string.IsNullOrWhiteSpace(m.Content)))
+                    {
+                        sb.Append($"<|im_start|>{msg.Role}\n");
+                        sb.Append(msg.Content);
+                        sb.Append("<|im_end|>\n");
+                    }
+                }
+            }
+
+            sb.Append("<|im_start|>user\n");
+            for (int i = 0; i < normalizedImages.Count; i++)
+            {
+                sb.Append($"[img-{i + 1}]");
+            }
+            sb.Append(request.Prompt);
+            sb.Append("<|im_end|>\n");
+            sb.Append("<|im_start|>assistant\n");
+
+            // Extract raw base64 from data URLs and build image_data array
+            var imageDataArray = new JsonArray();
+            for (int i = 0; i < normalizedImages.Count; i++)
+            {
+                string raw = normalizedImages[i];
+                int commaIdx = raw.IndexOf(',');
+                string base64 = (commaIdx >= 0) ? raw[(commaIdx + 1)..] : raw;
+                imageDataArray.Add(new JsonObject
+                {
+                    ["data"] = base64,
+                    ["id"] = i + 1
+                });
+            }
+
+            var payload = new JsonObject
+            {
+                ["prompt"] = sb.ToString(),
+                ["image_data"] = imageDataArray,
+                ["stream"] = request.Stream,
+                ["temperature"] = request.Temperature,
+                ["top_p"] = request.TopP,
+                ["top_k"] = request.TopK,
+                ["cache_prompt"] = !request.Isolated
+            };
+
+            if (request.MaxTokens > 0)
+            {
+                payload["n_predict"] = Math.Max(1, request.MaxTokens);
+            }
+
+            if (request.RepetitionPenalty > 0.0 && Math.Abs(request.RepetitionPenalty - 1.0) > 1e-9)
+            {
+                payload["repeat_penalty"] = request.RepetitionPenalty;
+            }
+
+            if (request.StopSequences is { Length: > 0 })
+            {
+                var stop = new JsonArray();
+                foreach (var seq in request.StopSequences.Where(s => !string.IsNullOrWhiteSpace(s)))
+                {
+                    stop.Add(seq);
+                }
+                if (stop.Count > 0)
+                {
+                    payload["stop"] = stop;
+                }
+            }
+
+            // Always stop at end-of-turn for ChatML
+            if (!payload.ContainsKey("stop"))
+            {
+                payload["stop"] = new JsonArray { "<|im_end|>" };
+            }
+            else if (payload["stop"] is JsonArray existingStop)
+            {
+                bool hasImEnd = false;
+                foreach (var item in existingStop)
+                {
+                    if (item?.GetValue<string>() == "<|im_end|>") { hasImEnd = true; break; }
+                }
+                if (!hasImEnd) existingStop.Add("<|im_end|>");
+            }
+
+            return payload;
+        }
+
+        private async Task<string> GenerateLocalCompletionAsync(JsonObject payload, CancellationToken cancellationToken)
+        {
+            string url = $"{this.CurrentBaseUrl}/completion";
+            using var response = await this._httpClient.PostAsJsonAsync(url, payload, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                string errorBody = string.Empty;
+                try { errorBody = await response.Content.ReadAsStringAsync(cancellationToken); } catch { }
+                throw new HttpRequestException($"llama.cpp returned {(int)response.StatusCode} ({response.ReasonPhrase}). {errorBody}");
+            }
+
+            var json = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken);
+            var content = json?["content"]?.GetValue<string>();
+            if (content != null && content.Contains("<|im_end|>"))
+            {
+                content = content.Replace("<|im_end|>", "");
+            }
+            return content?.TrimEnd() ?? string.Empty;
+        }
+
+        private async IAsyncEnumerable<string> StreamLocalCompletionChunksAsync(JsonObject payload, [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            string url = $"{this.CurrentBaseUrl}/completion";
+            using var request = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = JsonContent.Create(payload)
+            };
+
+            using var response = await this._httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                string errorBody = string.Empty;
+                try { errorBody = await response.Content.ReadAsStringAsync(cancellationToken); } catch { }
+                throw new HttpRequestException($"llama.cpp returned {(int)response.StatusCode} ({response.ReasonPhrase}). {errorBody}");
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var reader = new StreamReader(stream);
+
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var line = await reader.ReadLineAsync(cancellationToken);
+                if (line == null) yield break;
+
+                if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var data = line[5..].Trim();
+                if (string.Equals(data, "[DONE]", StringComparison.OrdinalIgnoreCase))
+                    yield break;
+
+                JsonObject? json;
+                try { json = JsonNode.Parse(data)?.AsObject(); }
+                catch { continue; }
+
+                var delta = json?["content"]?.GetValue<string>();
+                if (!string.IsNullOrEmpty(delta))
+                {
+                    // Stop if the model emits the end-of-turn token in the streamed text
+                    if (delta.Contains("<|im_end|>"))
+                    {
+                        var trimmed = delta.Replace("<|im_end|>", "").TrimEnd();
+                        if (!string.IsNullOrEmpty(trimmed)) yield return trimmed;
+                        yield break;
+                    }
+
+                    yield return delta;
+                }
+
+                bool stop = json?["stop"]?.GetValue<bool>() == true;
+                if (stop) yield break;
+            }
         }
 
         private async Task<string> GenerateSingleChatCompletionAsync(JsonObject payload, CancellationToken cancellationToken)
