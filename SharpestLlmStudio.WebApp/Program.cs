@@ -6,11 +6,15 @@ using SharpestLlmStudio.Shared;
 using SharpestLlmStudio.WebApp.Components;
 using SharpestLlmStudio.WebApp.ViewModels;
 using Microsoft.AspNetCore.HttpOverrides;
+using System.Runtime.Versioning;
+
+[assembly: SupportedOSPlatform("windows")]
 
 namespace SharpestLlmStudio.WebApp
 {
     public class Program
     {
+        [SupportedOSPlatform("windows")]
         public static void Main(string[] args)
         {
             var builder = WebApplication.CreateBuilder(args);

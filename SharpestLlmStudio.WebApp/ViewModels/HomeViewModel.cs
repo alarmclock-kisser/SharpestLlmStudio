@@ -18,6 +18,7 @@ using System.Text.RegularExpressions;
 
 namespace SharpestLlmStudio.WebApp.ViewModels
 {
+    [SupportedOSPlatform("windows")]
     public partial class HomeViewModel : IDisposable
     {
         private Action? stateChangedListeners;
@@ -69,6 +70,181 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
         }
 
+        public async Task OnRemoteProviderChanged(RemoteLlmProvider provider)
+        {
+            // Update selection and apply provider defaults
+            this.SelectedRemoteProvider = provider;
+            if (this.UseRemoteProvider)
+            {
+                this.ApplyRemoteProviderDefaults();
+            }
+
+            // Try to fetch models from provider and update list
+            await this.RefreshRemoteModelListAsync();
+        }
+
+        private void ApplyRemoteProviderDefaults()
+        {
+            // Always apply provider defaults when provider selection changes
+            switch (this.SelectedRemoteProvider)
+            {
+                case RemoteLlmProvider.Gemini:
+                    this.RemoteBaseUrl = "https://generativelanguage.googleapis.com/v1beta/openai";
+                    this.RemoteModelId = "gemini-1.5-flash";
+                    this.RemoteEmbeddingModelId = "text-embedding-004";
+                    break;
+
+                case RemoteLlmProvider.OpenAI:
+                    this.RemoteBaseUrl = "https://api.openai.com/v1";
+                    this.RemoteModelId = "gpt-4o-mini";
+                    this.RemoteEmbeddingModelId = "text-embedding-3-small";
+                    break;
+
+                case RemoteLlmProvider.OpenRouter:
+                    this.RemoteBaseUrl = "https://openrouter.ai/api/v1";
+                    if (string.IsNullOrWhiteSpace(this.RemoteModelId)) this.RemoteModelId = "openai/gpt-4o-mini";
+                    if (string.IsNullOrWhiteSpace(this.RemoteEmbeddingModelId)) this.RemoteEmbeddingModelId = this.RemoteModelId;
+                    break;
+
+                case RemoteLlmProvider.XAI:
+                    this.RemoteBaseUrl = "https://api.x.ai/v1";
+                    this.RemoteModelId = "grok-beta";
+                    this.RemoteEmbeddingModelId = this.RemoteModelId;
+                    break;
+
+                case RemoteLlmProvider.CustomOpenAiCompatible:
+                    // Leave RemoteBaseUrl as-is if user filled it; otherwise keep blank
+                    if (string.IsNullOrWhiteSpace(this.RemoteBaseUrl)) this.RemoteBaseUrl = this.Settings.DefaultRemoteBaseUrl ?? string.Empty;
+                    if (string.IsNullOrWhiteSpace(this.RemoteEmbeddingModelId)) this.RemoteEmbeddingModelId = this.RemoteModelId;
+                    break;
+            }
+
+            this.RemoteConnectionStatus = $"Remote provider defaults applied for {this.SelectedRemoteProvider}.";
+        }
+
+        public sealed record ModelUsageOption(string Value, string Text);
+        public sealed record WebChatProviderOption(string Value, string Text, string Url, string UiHints);
+
+        public static IReadOnlyList<ModelUsageOption> ModelUsageOptions { get; } =
+        [
+            new("local", "Local llama.cpp"),
+            new("remote", "Remote API provider"),
+            new("web", "Browser web chat")
+        ];
+
+        public static IReadOnlyList<WebChatProviderOption> WebChatProviderOptions { get; } =
+        [
+            new("gemini", "Gemini", "https://gemini.google.com", "Gemini usually places the prompt box near the bottom center with image and plus controls around the composer."),
+            new("qwen", "Qwen Chat", "https://chat.qwen.ai", "Qwen commonly shows a large bottom composer with a leading plus button for uploads and a send/voice action on the right."),
+            new("chatgpt", "ChatGPT", "https://chatgpt.com", "ChatGPT usually uses a bottom composer with attachment or plus controls near the left side of the input area and a send button on the right.")
+        ];
+
+        // UI helpers for remote provider model presets and API key visibility
+        public bool RemoteApiKeyVisible { get; private set; } = false;
+
+        public void ToggleRemoteApiKeyVisible()
+        {
+            this.RemoteApiKeyVisible = !this.RemoteApiKeyVisible;
+            this.RequestUiRefresh();
+        }
+
+        // dynamic list fetched from remote provider
+        private string[]? dynamicRemoteModels = null;
+        public IReadOnlyList<string>? DynamicRemoteModels => this.dynamicRemoteModels == null ? null : this.dynamicRemoteModels.ToList();
+
+        public bool IsFetchingRemoteModels { get; private set; } = false;
+        public string? RemoteModelListError { get; private set; }
+
+        public async Task RefreshRemoteModelListAsync()
+        {
+            if (this.IsFetchingRemoteModels) return;
+            this.IsFetchingRemoteModels = true;
+            this.RemoteModelListError = null;
+            this.RequestUiRefresh();
+
+            try
+            {
+                var list = await this.Client.FetchRemoteModelsAsync(this.SelectedRemoteProvider, this.RemoteBaseUrl, this.RemoteApiKey, CancellationToken.None);
+                this.dynamicRemoteModels = list;
+                if (this.dynamicRemoteModels != null && this.dynamicRemoteModels.Length > 0)
+                {
+                    // If current RemoteModelId is empty or not in the list, pick the first dynamic model
+                    if (string.IsNullOrWhiteSpace(this.RemoteModelId) || !this.dynamicRemoteModels.Contains(this.RemoteModelId))
+                    {
+                        this.RemoteModelId = this.dynamicRemoteModels[0];
+                    }
+                }
+                else
+                {
+                    // no models returned
+                    this.RemoteModelListError = "No models returned by provider.";
+                }
+            }
+            catch (Exception ex)
+            {
+                this.dynamicRemoteModels = null;
+                this.RemoteModelListError = ex.Message;
+                StaticLogger.Log(ex, "Error fetching remote model list");
+            }
+            finally
+            {
+                this.IsFetchingRemoteModels = false;
+                this.RequestUiRefresh();
+            }
+        }
+
+        public IReadOnlyList<string> RemoteModelOptions
+        {
+            get
+            {
+                // Merge static presets with any dynamic list fetched from remote provider
+                var staticPresets = this.SelectedRemoteProvider switch
+                {
+                    RemoteLlmProvider.Gemini => new List<string> { "gemini-1.5-flash", "gemini-1.5-pro" },
+                    RemoteLlmProvider.OpenAI => new List<string> { "gpt-4o-mini", "gpt-4o", "gpt-4o-realtime-preview" },
+                    RemoteLlmProvider.OpenRouter => new List<string> { "openai/gpt-4o-mini" },
+                    RemoteLlmProvider.XAI => new List<string> { "grok-beta" },
+                    _ => new List<string>()
+                };
+
+                var final = new List<string>();
+                // include dynamic fetched models first if available
+                if (this.dynamicRemoteModels != null && this.dynamicRemoteModels.Length > 0)
+                {
+                    final.AddRange(this.dynamicRemoteModels);
+                }
+
+                // then add static presets that are not already present
+                foreach (var p in staticPresets)
+                {
+                    if (!final.Contains(p)) final.Add(p);
+                }
+
+                final.Add("Custom...");
+                return final;
+            }
+        }
+
+        private string selectedRemoteModelPreset = "Custom...";
+        public string SelectedRemoteModelPreset
+        {
+            get => this.selectedRemoteModelPreset;
+            set
+            {
+                if (string.Equals(this.selectedRemoteModelPreset, value, StringComparison.Ordinal)) return;
+                this.selectedRemoteModelPreset = value ?? "Custom...";
+
+                // If user selected a preset other than Custom..., apply it to RemoteModelId but do not overwrite an explicit user value unless it was empty
+                if (!string.Equals(this.selectedRemoteModelPreset, "Custom...", StringComparison.Ordinal))
+                {
+                    // always set remote model id to preset when user explicitly chooses a preset
+                    this.RemoteModelId = this.selectedRemoteModelPreset;
+                }
+
+                this.RequestUiRefresh();
+            }
+        }
+
         public static readonly IReadOnlyList<string> ModelSortOptions = ["A - Z", "Biggest", "Params", "Newest", "Vision"];
 
         private string modelSortMode = "Newest";
@@ -104,6 +280,131 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         public bool ForceUnload { get; set; } = true;
         public LlamaModelInfo? LoadedModel { get; set; } = null;
+        private string selectedModelUsageMode = "local";
+        private bool useRemoteProvider;
+        public string SelectedModelUsageMode
+        {
+            get => this.selectedModelUsageMode;
+            set
+            {
+                string normalized = value?.Trim().ToLowerInvariant() switch
+                {
+                    "remote" => "remote",
+                    "web" => "web",
+                    _ => "local"
+                };
+
+                if (string.Equals(this.selectedModelUsageMode, normalized, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                this.selectedModelUsageMode = normalized;
+                switch (normalized)
+                {
+                    case "remote":
+                        this.useRemoteProvider = true;
+                        this.ApplyRemoteProviderDefaults();
+                        _ = this.RefreshRemoteModelListAsync();
+                        break;
+                    case "web":
+                        this.useRemoteProvider = false;
+                        this.WebChatConnectionStatus = $"Browser web chat target selected: {this.SelectedWebChatProviderText}.";
+                        break;
+                    default:
+                        this.useRemoteProvider = false;
+                        this.RemoteConnectionStatus = "Local llama.cpp mode selected.";
+                        break;
+                }
+
+                this.RequestUiRefresh();
+            }
+        }
+
+        public bool UseRemoteProvider
+        {
+            get => this.useRemoteProvider;
+            set
+            {
+                if (this.useRemoteProvider == value)
+                {
+                    return;
+                }
+
+                this.useRemoteProvider = value;
+                if (value)
+                {
+                    this.selectedModelUsageMode = "remote";
+                    this.ApplyRemoteProviderDefaults();
+                    // When remote mode is enabled, refresh available model list automatically
+                    _ = this.RefreshRemoteModelListAsync();
+                }
+                else if (!this.UseWebChatProvider)
+                {
+                    this.selectedModelUsageMode = "local";
+                }
+
+                this.RequestUiRefresh();
+            }
+        }
+
+        private string selectedWebChatProvider = "qwen";
+        public string SelectedWebChatProvider
+        {
+            get => this.selectedWebChatProvider;
+            set
+            {
+                string normalized = WebChatProviderOptions.Any(p => string.Equals(p.Value, value, StringComparison.OrdinalIgnoreCase))
+                    ? value.Trim().ToLowerInvariant()
+                    : "qwen";
+
+                if (string.Equals(this.selectedWebChatProvider, normalized, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                this.selectedWebChatProvider = normalized;
+                this.WebChatConnectionStatus = $"Browser web chat target selected: {this.SelectedWebChatProviderText}.";
+                this.RequestUiRefresh();
+            }
+        }
+
+        public bool WebChatOpenBrowserOnPrepare { get; set; } = false;
+        public bool WebChatCopyLatestScreenshotOnPrepare { get; set; } = true;
+        public string WebChatConnectionStatus { get; private set; } = "No browser web chat target prepared.";
+        public bool UseWebChatProvider => string.Equals(this.selectedModelUsageMode, "web", StringComparison.Ordinal);
+        public string SelectedWebChatProviderUrl => WebChatProviderOptions.First(p => string.Equals(p.Value, this.SelectedWebChatProvider, StringComparison.OrdinalIgnoreCase)).Url;
+        public string SelectedWebChatProviderText => WebChatProviderOptions.First(p => string.Equals(p.Value, this.SelectedWebChatProvider, StringComparison.OrdinalIgnoreCase)).Text;
+        public string SelectedWebChatProviderHints => WebChatProviderOptions.First(p => string.Equals(p.Value, this.SelectedWebChatProvider, StringComparison.OrdinalIgnoreCase)).UiHints;
+        public bool CanUsePromptComposer => (this.IsLoaded || this.UseWebChatProvider) && !this.IsBusy;
+
+        private RemoteLlmProvider selectedRemoteProvider;
+        public RemoteLlmProvider SelectedRemoteProvider
+        {
+            get => this.selectedRemoteProvider;
+            set
+            {
+                if (this.selectedRemoteProvider == value)
+                {
+                    return;
+                }
+
+                this.selectedRemoteProvider = value;
+                if (this.UseRemoteProvider)
+                {
+                    this.ApplyRemoteProviderDefaults();
+                    // provider changed while in remote mode: refresh model list
+                    _ = this.RefreshRemoteModelListAsync();
+                }
+
+                this.RequestUiRefresh();
+            }
+        }
+        public string RemoteApiKey { get; set; } = string.Empty;
+        public string RemoteModelId { get; set; } = string.Empty;
+        public string RemoteEmbeddingModelId { get; set; } = string.Empty;
+        public string RemoteBaseUrl { get; set; } = string.Empty;
+        public string RemoteConnectionStatus { get; set; } = "No remote provider connected.";
         public int ContextSize { get; set; } = 1024;
         public bool UseMmproj { get; set; } = true;
         public bool UseFlashAttention { get; set; } = true;
@@ -152,6 +453,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public bool IsLoaded { get; set; } = false;
         public bool IsReusedInstance { get; set; } = false;
         public bool IsBusy { get; set; } = false;
+        public bool IsRemoteLoaded => this.Client.IsRemoteMode;
         public bool IsImagePathsExpanded { get; set; } = false;
         public List<string> SelectedImagePaths { get; private set; } = [];
         private readonly Dictionary<string, LoadedImageMetadata> loadedImageMetadata = new(StringComparer.OrdinalIgnoreCase);
@@ -357,7 +659,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         // This keeps the Cancel button enabled so the user can abort agent tool calls too.
         public bool IsAgentActionRunning { get; set; } = false;
 
-        public bool CanSend =>! this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput);
+        public bool CanSend => !this.IsGenerating && !string.IsNullOrWhiteSpace(this.UserInput);
         public string SystemPrompt { get; set; } = string.Empty;
         public string SystemPromptDisplay
         {
@@ -722,6 +1024,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public LlamaModelInfo? SelectedModelInfo => this.LlamaModels.FirstOrDefault(m => m.Name == this.SelectedModelName);
         public bool HasMmproj => this.SelectedModelInfo?.MmprojFilePath != null;
         public bool IsSelectedOmni => this.SelectedModelInfo?.IsOmni == true;
+        public bool SupportsLocalLlamaParameters => !this.UseRemoteProvider && !this.UseWebChatProvider;
+        public IEnumerable<RemoteLlmProvider> RemoteProviders => Enum.GetValues<RemoteLlmProvider>();
 
         public string MmprojLabel => this.IsSelectedOmni
             ? "Model is Any-to-Any (Omni)"
@@ -820,6 +1124,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             // Initialize image preferences from settings defaults
             this.ImageMaxDimension = Math.Max(0, this.Settings.DefaultImageMaxDimension);
             this.ImageFormat = string.IsNullOrWhiteSpace(this.Settings.DefaultImageFormat) ? "jpg" : NormalizeImageFormat(this.Settings.DefaultImageFormat);
+
+            this.ClickerInstructionsDraft = this.ClickerInstructions;
         }
 
         // Handle UI interaction for ImageMaxDimension numeric control.
@@ -987,6 +1293,10 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         private async Task InitializeInternalAsync()
         {
+            this.SelectedRemoteProvider = this.Settings.DefaultRemoteProvider;
+            this.RemoteBaseUrl = this.Settings.DefaultRemoteBaseUrl;
+            this.RemoteModelId = this.Settings.DefaultRemoteModelId;
+            this.RemoteEmbeddingModelId = this.Settings.DefaultRemoteEmbeddingModelId;
             await this.RefreshAsync();
             await this.RefreshContextAsync();
             this.SyncChatMessagesFromClient();
@@ -1317,8 +1627,55 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         [SupportedOSPlatform("windows")]
         public async Task StartGenerationAsync()
         {
+            if (this.UseWebChatProvider)
+            {
+                string webChatPrompt = this.UserInput.Trim();
+                string queuedImageKey = this.SelectedImagePaths.FirstOrDefault() ?? string.Empty;
+                await this.PrepareWebChatPromptAsync();
+
+                if (!string.IsNullOrWhiteSpace(webChatPrompt))
+                {
+                    this.QueueWebChatClipboardWork(webChatPrompt, queuedImageKey);
+                    this.ChatMessages.Add(new LlamaChatMessage { Role = "user", Content = webChatPrompt, CreatedAtUtc = DateTime.UtcNow });
+                    if (!this.IsolatedGeneration)
+                    {
+                        this.Client.AddUserMessage(webChatPrompt);
+                    }
+
+                    string assistantStatus = string.IsNullOrWhiteSpace(this.WebChatConnectionStatus)
+                        ? $"Prompt prepared for {this.SelectedWebChatProviderText}."
+                        : this.WebChatConnectionStatus;
+                    this.QueuePendingWebChatAssistantMessage(assistantStatus);
+
+                    this.UserInput = string.Empty;
+                    this.WebChatConnectionStatus = $"Prompt prepared for {this.SelectedWebChatProviderText}. Waiting for response import or Clicker capture.";
+                    this.LastActionMessage = $"Prompt prepared for {this.SelectedWebChatProviderText}.";
+                    this.RequestUiRefresh();
+                    await this.ScrollChatToBottomAsync();
+                }
+
+                return;
+            }
+
             if (this.IsGenerating || !this.IsLoaded || string.IsNullOrWhiteSpace(this.UserInput))
             {
+                return;
+            }
+
+            // When the Clicker loop is running, redirect the user message as a persistent
+            // live note so the Clicker model receives it with full screenshot context on the
+            // next iteration instead of sending it to the context-less chat model.
+            if (this.IsClickerLoopRunning)
+            {
+                string note = this.UserInput.Trim();
+                this.clickerLiveUserNote = string.IsNullOrWhiteSpace(this.clickerLiveUserNote)
+                    ? note
+                    : this.clickerLiveUserNote.Trim() + "\n" + note;
+                this.ChatMessages.Add(new LlamaChatMessage { Role = "user", Content = note, CreatedAtUtc = DateTime.UtcNow });
+                this.ChatMessages.Add(new LlamaChatMessage { Role = "assistant", Content = $"[Clicker note captured — will be included in next iteration]", CreatedAtUtc = DateTime.UtcNow });
+                this.UserInput = string.Empty;
+                this.LastActionMessage = "Message forwarded to Clicker as live note.";
+                this.RequestUiRefresh();
                 return;
             }
 
@@ -1501,6 +1858,39 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 await this.TryAutoExecuteWebSearchAsync();
                 this.RequestUiRefresh();
             }
+        }
+
+        [SupportedOSPlatform("windows")]
+        public async Task PrepareWebChatPromptAsync()
+        {
+            if (!this.UseWebChatProvider || string.IsNullOrWhiteSpace(this.UserInput))
+            {
+                return;
+            }
+
+            try
+            {
+                await SetClipboardTextAsync(this.UserInput.Trim());
+                this.WebChatConnectionStatus = $"Prompt copied to clipboard for {this.SelectedWebChatProviderText}. Paste it into the web chat input area.";
+                this.LastActionMessage = $"Prompt copied for {this.SelectedWebChatProviderText}.";
+            }
+            catch (Exception ex)
+            {
+                this.WebChatConnectionStatus = $"Failed to copy prompt for {this.SelectedWebChatProviderText}: {ex.Message}";
+            }
+
+            this.RequestUiRefresh();
+        }
+
+        [SupportedOSPlatform("windows")]
+        private static Task SetClipboardTextAsync(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return Task.CompletedTask;
+            }
+
+            return RunOnStaThreadAsync(() => System.Windows.Forms.Clipboard.SetText(text));
         }
 
         public void CancelGeneration()
@@ -1745,7 +2135,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         public async Task RefreshAsync()
         {
-            this.LlamaModels = this.Client.Models.ToList();
+            this.LlamaModels = this.Client.EnsureModelsLoaded().ToList();
             this.ApplyModelSort();
 
             if (!this.IsLoaded && this.selectDefaultModelAfterReusedUnload)
@@ -2404,6 +2794,19 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         public Task KillAllLlamaServerExeInstancesAsync()
         {
+            if (this.Client.IsRemoteMode)
+            {
+                this.Client.DisconnectRemote();
+                this.IsLoaded = false;
+                this.LoadedModel = null;
+                this.IsGenerating = false;
+                this.LastGenerationStats = null;
+                this.ModelLoadingTimeString = "Remote provider disconnected.";
+                this.RemoteConnectionStatus = "Remote provider disconnected.";
+                this.RequestUiRefresh();
+                return Task.CompletedTask;
+            }
+
             int? killed = this.Client.KillAllLlamaServerExeInstances();
             this.LastActionMessage = killed.HasValue
                 ? $"Killed {killed.Value} llama-server instance(s)."
@@ -2456,6 +2859,192 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         private void RequestUiRefresh()
         {
             this.RaiseStateChanged();
+        }
+
+        [SupportedOSPlatform("windows")]
+        public async Task PrepareWebChatProviderAsync(bool includeLatestClickerScreenshot = true)
+        {
+            if (!this.UseWebChatProvider)
+            {
+                this.WebChatConnectionStatus = "Select Browser web chat mode first.";
+                this.RequestUiRefresh();
+                return;
+            }
+
+            try
+            {
+                if (this.WebChatOpenBrowserOnPrepare)
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = this.SelectedWebChatProviderUrl,
+                        UseShellExecute = true
+                    });
+                }
+
+                bool screenshotCopied = false;
+                if (includeLatestClickerScreenshot && this.WebChatCopyLatestScreenshotOnPrepare && !string.IsNullOrWhiteSpace(this.ClickerScreenshotDataUrl))
+                {
+                    screenshotCopied = await CopyDataUrlImageToClipboardAsync(this.ClickerScreenshotDataUrl);
+                }
+
+                this.WebChatConnectionStatus = screenshotCopied
+                    ? $"Prepared {this.SelectedWebChatProviderText}. Browser opened and latest Clicker screenshot copied to clipboard."
+                    : $"Prepared {this.SelectedWebChatProviderText}. Browser opened. {this.SelectedWebChatProviderHints}";
+            }
+            catch (Exception ex)
+            {
+                this.WebChatConnectionStatus = $"Failed to prepare {this.SelectedWebChatProviderText}: {ex.Message}";
+            }
+
+            this.RequestUiRefresh();
+        }
+
+        [SupportedOSPlatform("windows")]
+        public async Task CopyLatestClickerScreenshotToClipboardAsync()
+        {
+            if (string.IsNullOrWhiteSpace(this.ClickerScreenshotDataUrl))
+            {
+                this.WebChatConnectionStatus = "No Clicker screenshot is available to copy.";
+                this.RequestUiRefresh();
+                return;
+            }
+
+            bool success = await CopyDataUrlImageToClipboardAsync(this.ClickerScreenshotDataUrl);
+            this.WebChatConnectionStatus = success
+                ? "Latest Clicker screenshot copied to clipboard."
+                : "Could not copy the latest Clicker screenshot to the clipboard.";
+            this.RequestUiRefresh();
+        }
+
+        [SupportedOSPlatform("windows")]
+        private async Task<bool> CopyImageSourceToClipboardAsync(string imageSource)
+        {
+            if (string.IsNullOrWhiteSpace(imageSource))
+            {
+                return false;
+            }
+
+            if (imageSource.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
+            {
+                return await CopyDataUrlImageToClipboardAsync(imageSource);
+            }
+
+            string? dataUrl = null;
+            if (string.Equals(imageSource, this.clickerLastScreenshotPath, StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(this.ClickerScreenshotDataUrl))
+            {
+                dataUrl = this.ClickerScreenshotDataUrl;
+            }
+
+            if (string.IsNullOrWhiteSpace(dataUrl) && File.Exists(imageSource))
+            {
+                try
+                {
+                    string extension = Path.GetExtension(imageSource).ToLowerInvariant();
+                    string mimeType = extension switch
+                    {
+                        ".png" => "image/png",
+                        ".bmp" => "image/bmp",
+                        ".gif" => "image/gif",
+                        ".webp" => "image/webp",
+                        ".tif" or ".tiff" => "image/tiff",
+                        _ => "image/jpeg"
+                    };
+
+                    byte[] bytes = await File.ReadAllBytesAsync(imageSource);
+                    dataUrl = $"data:{mimeType};base64,{Convert.ToBase64String(bytes)}";
+                }
+                catch
+                {
+                    dataUrl = null;
+                }
+            }
+
+            return !string.IsNullOrWhiteSpace(dataUrl) && await CopyDataUrlImageToClipboardAsync(dataUrl);
+        }
+
+        [SupportedOSPlatform("windows")]
+        private static Task<bool> CopyDataUrlImageToClipboardAsync(string dataUrl)
+        {
+            if (string.IsNullOrWhiteSpace(dataUrl) || !dataUrl.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
+            {
+                return Task.FromResult(false);
+            }
+
+            try
+            {
+                int commaIndex = dataUrl.IndexOf(',');
+                if (commaIndex < 0 || commaIndex >= dataUrl.Length - 1)
+                {
+                    return Task.FromResult(false);
+                }
+
+                string base64 = dataUrl[(commaIndex + 1)..];
+                byte[] bytes = Convert.FromBase64String(base64);
+
+                return RunOnStaThreadAsync(() =>
+                {
+                    using var ms = new MemoryStream(bytes);
+                    using var image = System.Drawing.Image.FromStream(ms);
+                    using var bitmap = new System.Drawing.Bitmap(image);
+                    System.Windows.Forms.Clipboard.SetImage(bitmap);
+                    return true;
+                });
+            }
+            catch
+            {
+                return Task.FromResult(false);
+            }
+        }
+
+        /// <summary>
+        /// Runs the given action on a dedicated STA thread.
+        /// WinForms Clipboard APIs require STA; Blazor/ASP.NET threads are MTA.
+        /// </summary>
+        private static Task RunOnStaThreadAsync(Action action)
+        {
+            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    action();
+                    tcs.SetResult();
+                }
+                catch (Exception ex)
+                {
+                    tcs.SetException(ex);
+                }
+            });
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.IsBackground = true;
+            thread.Start();
+            return tcs.Task;
+        }
+
+        /// <summary>
+        /// Runs the given function on a dedicated STA thread and returns its result.
+        /// </summary>
+        private static Task<T> RunOnStaThreadAsync<T>(Func<T> func)
+        {
+            var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    T result = func();
+                    tcs.SetResult(result);
+                }
+                catch (Exception ex)
+                {
+                    tcs.SetException(ex);
+                }
+            });
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.IsBackground = true;
+            thread.Start();
+            return tcs.Task;
         }
 
         private void RefreshKnowledgeEntriesFromClient()
@@ -2739,17 +3328,17 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public async Task OnSubsequentRenderAsync(DotNetObjectReference<HomeViewModel> vmRef, CancellationToken cancellationToken = default)
         {
             if (cancellationToken.IsCancellationRequested) return;
-            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupPromptEnter", "promptInput", vmRef);
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupPromptEnter", cancellationToken, "promptInput", vmRef);
             if (cancellationToken.IsCancellationRequested) return;
-            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupClipboardImagePaste", "promptInput", vmRef);
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupClipboardImagePaste", cancellationToken, "promptInput", vmRef);
             if (cancellationToken.IsCancellationRequested) return;
-            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupConditionalAutoScroll", ChatOutputElementId, 0.1);
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupConditionalAutoScroll", cancellationToken, ChatOutputElementId, 0.1);
             if (cancellationToken.IsCancellationRequested) return;
-            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupScrollToBottomButton", ChatOutputElementId, "chat-scroll-bottom-button");
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupScrollToBottomButton", cancellationToken, ChatOutputElementId, "chat-scroll-bottom-button");
             if (cancellationToken.IsCancellationRequested) return;
-            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupThinkBlocks", ChatOutputElementId);
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupThinkBlocks", cancellationToken, ChatOutputElementId);
             if (cancellationToken.IsCancellationRequested) return;
-            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupMicButton", "micButton", vmRef, "audioFilePicker");
+            await this.Js.InvokeVoidAsync("sharpestNavMenu.setupMicButton", cancellationToken, "micButton", vmRef, "audioFilePicker");
             if (cancellationToken.IsCancellationRequested) return;
             await this.TrySetupClickerLoopEscapeAsync(vmRef);
 
@@ -2770,7 +3359,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 this._lastChatMessageCount = this.ChatMessages.Count;
                 if (cancellationToken.IsCancellationRequested) return;
-                await this.Js.InvokeVoidAsync("sharpestNavMenu.autoScrollIfSticky", ChatOutputElementId);
+                await this.Js.InvokeVoidAsync("sharpestNavMenu.autoScrollIfSticky", cancellationToken, ChatOutputElementId);
             }
         }
 
@@ -3443,9 +4032,14 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 if (this.IsLoaded)
                 {
                     // Unload
-                    await StaticLogger.LogAsync("[Blazor] Unloading model...");
+                    await StaticLogger.LogAsync(this.UseRemoteProvider ? "[Blazor] Disconnecting remote provider..." : "[Blazor] Unloading model...");
 
-                    if (this.IsReusedInstance)
+                    if (this.Client.IsRemoteMode)
+                    {
+                        this.Client.UnloadModel();
+                        this.RemoteConnectionStatus = "Remote provider disconnected.";
+                    }
+                    else if (this.IsReusedInstance)
                     {
                         // Reused external instance cannot be unloaded in-place via tracked process handle.
                         // Kill server process(es) to actually release RAM/VRAM.
@@ -3474,11 +4068,57 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     this.ContextSaveName = string.Empty;
                     this.LastGenerationStats = null;
 
-                    await StaticLogger.LogAsync("[Blazor] Model unloaded successfully.");
+                    await StaticLogger.LogAsync(this.Client.IsRemoteMode ? "[Blazor] Remote provider disconnected successfully." : "[Blazor] Model unloaded successfully.");
                 }
                 else
                 {
                     this.ResetKnowledgeBaseState();
+
+                    if (this.UseRemoteProvider)
+                    {
+                        var remoteRequest = new RemoteLlmConnectionRequest
+                        {
+                            Provider = this.SelectedRemoteProvider,
+                            ApiKey = this.RemoteApiKey,
+                            ModelId = this.RemoteModelId,
+                            EmbeddingModelId = this.RemoteEmbeddingModelId,
+                            BaseUrl = this.RemoteBaseUrl,
+                            ContextSizeHint = this.ContextSize
+                        };
+
+                        await StaticLogger.LogAsync($"[Blazor] Connecting remote provider '{remoteRequest.Provider}' with model '{remoteRequest.ModelId}'...");
+                        this.ModelLoadingTimeString = "Connecting remote provider…";
+                        this.RequestUiRefresh();
+
+                        Stopwatch remoteSw = Stopwatch.StartNew();
+                        RemoteLlmConnectionResult remoteResult = await this.Client.ConnectRemoteAsync(remoteRequest);
+                        remoteSw.Stop();
+
+                        if (remoteResult.Success)
+                        {
+                            GenerationStats.ResetAccumulatedTotals();
+                            this.ModelLoadingTimeString = $"{remoteSw.Elapsed.TotalSeconds:F3} sec. elapsed connecting remote provider.";
+                            this.RemoteConnectionStatus = $"Connected to {remoteResult.ProviderLabel}: {this.RemoteModelId}";
+                            this.IsLoaded = true;
+                            this.IsReusedInstance = false;
+                            this.LoadedModel = null;
+                            this.IsModelPanelExpanded = true;
+                            this.LastActionMessage = $"Remote provider connected: {remoteResult.ProviderLabel}";
+                            await StaticLogger.LogAsync($"[Blazor] Remote provider connected successfully in {remoteSw.Elapsed.TotalSeconds:F3}s — API at {remoteResult.BaseApiUrl}");
+                            this.ScheduleModelPanelAutoCollapse();
+                        }
+                        else
+                        {
+                            this.ModelLoadingTimeString = $"Remote connect failed after {remoteSw.Elapsed.TotalSeconds:F3} sec.";
+                            this.RemoteConnectionStatus = "Remote provider connection failed.";
+                            this.LastLoadError = remoteResult.ErrorMessage ?? "Unknown error during remote provider connect.";
+                            this.IsLoaded = false;
+                            this.LoadedModel = null;
+                            await StaticLogger.LogAsync($"[Blazor] Remote connect FAILED after {remoteSw.Elapsed.TotalSeconds:F3}s: {this.LastLoadError}");
+                        }
+
+                        return;
+                    }
 
                     // Load
                     LlamaModelInfo? modelToLoad = this.LlamaModels.FirstOrDefault(m => m.Name.Equals(this.SelectedModelName, StringComparison.OrdinalIgnoreCase));
@@ -3775,12 +4415,14 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         {
             try
             {
-                // this.LastGenerationStats = await this.Client.LastGenerationStats;
+                this.LastGenerationStats = this.Client.GetLastGenerationStatsSnapshot();
             }
             catch
             {
                 // ignore errors
             }
+
+            await Task.CompletedTask;
         }
 
         public async Task UpdateHardwareStatsAsync()

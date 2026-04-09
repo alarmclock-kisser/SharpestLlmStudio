@@ -50,6 +50,10 @@ namespace SharpestLlmStudio.Shared
         public bool AllowAllNonAdminCommands { get; set; } = false;
         public bool AutoAllowWebSearch { get; set; } = true;
         public string ClickerProtectedZoneModelWarning { get; set; } = string.Empty;
+        public RemoteLlmProvider DefaultRemoteProvider { get; set; } = RemoteLlmProvider.OpenAI;
+        public string DefaultRemoteBaseUrl { get; set; } = string.Empty;
+        public string DefaultRemoteModelId { get; set; } = string.Empty;
+        public string DefaultRemoteEmbeddingModelId { get; set; } = string.Empty;
 
 
 

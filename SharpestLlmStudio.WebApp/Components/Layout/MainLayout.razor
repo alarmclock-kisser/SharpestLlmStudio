@@ -85,6 +85,8 @@
     string darkModeSetting = "off";
     bool isDarkModeActive;
 
+    private bool _disposed;
+
     protected override void OnInitialized()
     {
         this.VM.RegisterStateChangeListener(OnViewModelStateChanged);
@@ -199,10 +201,18 @@
 
     private async Task ApplyDarkModeAsync()
     {
-        bool dark = this.darkModeSetting == "on";
+        if (_disposed) return;
 
+        bool dark = this.darkModeSetting == "on";
         this.isDarkModeActive = dark;
-        await this.JS.InvokeVoidAsync("sharpestNavMenu.applyDarkMode", dark);
+
+        try
+        {
+            await this.JS.InvokeVoidAsync("sharpestNavMenu.applyDarkMode", dark);
+        }
+        catch (TaskCanceledException) { }
+        catch (OperationCanceledException) { }
+        catch (JSDisconnectedException) { }
     }
 
     private static string NormalizeDarkMode(string? value)
@@ -223,6 +233,7 @@
 
     public void Dispose()
     {
+        _disposed = true;
         this.VM.UnregisterStateChangeListener(OnViewModelStateChanged);
     }
 }

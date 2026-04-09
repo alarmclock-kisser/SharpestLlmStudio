@@ -27,7 +27,10 @@ namespace SharpestLlmStudio.Runtime
 
         public async Task<LlamaModelLoadResult> LoadModelAsync(LlamaModelLoadRequest request, CancellationToken cancellationToken = default)
         {
+            this.DisconnectRemote();
             string targetBaseUrl = $"http://{request.Host}:{request.Port}";
+            bool requiresMultimodalReload = (request.IncludeMmproj || request.ModelInfo.IsOmni)
+                && !string.IsNullOrWhiteSpace(request.ModelInfo.MmprojFilePath);
 
             if (this._settings.KillExistingServerInstances)
             {
@@ -39,10 +42,29 @@ namespace SharpestLlmStudio.Runtime
             }
             else
             {
-                var reused = await this.TryReuseExistingInstanceAsync(targetBaseUrl, request.ContextSize, request.BatchSize, cancellationToken);
-                if (reused != null)
+                if (requiresMultimodalReload)
                 {
-                    return reused;
+                    // Multimodal models require --mmproj and --jinja which an existing
+                    // server instance almost certainly does not have. Kill any orphaned
+                    // instances so the new server can bind the port and start correctly.
+                    int killed = this.KillAllLlamaServerExeInstances() ?? 0;
+                    if (killed > 0)
+                    {
+                        await StaticLogger.LogAsync($"[LlamaCpp] Killed {killed} existing llama-server.exe instance(s) because the requested model requires multimodal/mmproj support.");
+                        await Task.Delay(500, cancellationToken);
+                    }
+                    else
+                    {
+                        await StaticLogger.LogAsync("[LlamaCpp] Skipping existing server reuse because the requested model requires multimodal/mmproj support.");
+                    }
+                }
+                else
+                {
+                    var reused = await this.TryReuseExistingInstanceAsync(targetBaseUrl, request.ContextSize, request.BatchSize, cancellationToken);
+                    if (reused != null)
+                    {
+                        return reused;
+                    }
                 }
             }
 
@@ -85,6 +107,13 @@ namespace SharpestLlmStudio.Runtime
                 if (!hasMmproj)
                 {
                     args += " --embedding --pooling mean";
+                }
+
+                // Enable Jinja2 template rendering for multimodal models so that content arrays
+                // with image_url parts are processed correctly by common_chat_parse().
+                if (hasMmproj)
+                {
+                    args += " --jinja";
                 }
 
                 // Enable slot save/restore for context management
@@ -339,6 +368,12 @@ namespace SharpestLlmStudio.Runtime
         public void UnloadModel()
         {
             this.StopIdleMonitor();
+
+            if (this.IsRemoteMode)
+            {
+                this.DisconnectRemote();
+                return;
+            }
 
             if (this._serverProcess != null)
             {

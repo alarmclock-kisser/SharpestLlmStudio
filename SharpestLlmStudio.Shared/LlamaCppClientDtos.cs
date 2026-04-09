@@ -31,6 +31,34 @@ namespace SharpestLlmStudio.Shared
         public bool Stream { get; set; } = true;
     }
 
+    public enum RemoteLlmProvider
+    {
+        OpenAI,
+        Gemini,
+        OpenRouter,
+        XAI,
+        CustomOpenAiCompatible
+    }
+
+    public sealed class RemoteLlmConnectionRequest
+    {
+        public RemoteLlmProvider Provider { get; set; }
+        public string ApiKey { get; set; } = string.Empty;
+        public string ModelId { get; set; } = string.Empty;
+        public string? EmbeddingModelId { get; set; }
+        public string? BaseUrl { get; set; }
+        public int ContextSizeHint { get; set; } = 4096;
+    }
+
+    public sealed class RemoteLlmConnectionResult
+    {
+        public bool Success { get; set; }
+        public string? ErrorMessage { get; set; }
+        public string BaseApiUrl { get; set; } = string.Empty;
+        public string ProviderLabel { get; set; } = string.Empty;
+        public string[]? AvailableModels { get; set; }
+    }
+
     public sealed class LlamaContextSaveResult
     {
         public bool Success { get; set; }

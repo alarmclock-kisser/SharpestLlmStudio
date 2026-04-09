@@ -37,7 +37,16 @@ namespace SharpestLlmStudio.Runtime.ONNX
         {
             this.Settings = settings;
             this._audioHandling = new AudioHandling();
-            this.DirectMlDevices = this._dxgiHelper.GetDirectMlDevices();
+        }
+
+        public List<string> EnsureDirectMlDevicesLoaded()
+        {
+            if (this.DirectMlDevices.Count == 0)
+            {
+                this.DirectMlDevices = this._dxgiHelper.GetDirectMlDevices();
+            }
+
+            return this.DirectMlDevices;
         }
 
 

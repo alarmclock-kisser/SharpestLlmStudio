@@ -53,12 +53,52 @@ namespace SharpestLlmStudio.Monitoring
             public string DisplayLabel => $"{this.Action}: {this.Point.DisplayLabel}";
         }
 
+        public enum KeyboardAction
+        {
+            Press,
+            Down,
+            Up,
+            Type
+        }
+
+        public sealed record ParsedKeyboardCommand(IReadOnlyList<string> Keys, KeyboardAction Action, string? Text)
+        {
+            public string DisplayLabel => this.Action == KeyboardAction.Type
+                ? $"Type: {this.Text ?? string.Empty}"
+                : $"{this.Action}: {string.Join("+", this.Keys)}";
+        }
+
         private bool leftButtonHeld;
         private bool leftButtonHeldBackground;
         private nint? leftButtonHeldWindowHandle;
         private Point? lastHeldScreenPoint;
+        private readonly HashSet<byte> heldKeyboardKeys = [];
+        private bool heldKeyboardKeysBackground;
+        private nint? heldKeyboardWindowHandle;
 
         public bool IsLeftButtonHeld => this.leftButtonHeld;
+
+        public nint GetCurrentForegroundWindowHandle()
+        {
+            return GetForegroundWindow();
+        }
+
+        public bool TryRestoreForegroundWindow(nint handle)
+        {
+            if (handle == IntPtr.Zero || !IsWindow(handle))
+            {
+                return false;
+            }
+
+            try
+            {
+                return SetForegroundWindow(handle);
+            }
+            catch
+            {
+                return false;
+            }
+        }
 
         public bool TryMarkForegroundWindow(out MarkedWindowInfo? window)
         {
@@ -83,7 +123,43 @@ namespace SharpestLlmStudio.Monitoring
             try
             {
                 ShowWindow(window.Handle, SW_RESTORE);
-                return SetForegroundWindow(window.Handle);
+                if (SetForegroundWindow(window.Handle) && GetForegroundWindow() == window.Handle)
+                {
+                    return true;
+                }
+
+                // Use AttachThreadInput trick to allow SetForegroundWindow from a background thread.
+                // Windows blocks SetForegroundWindow unless the calling thread owns the foreground —
+                // temporarily attaching to the foreground thread's input queue bypasses this restriction.
+                nint foregroundHwnd = GetForegroundWindow();
+                uint foregroundThreadId = foregroundHwnd != IntPtr.Zero ? GetWindowThreadProcessId(foregroundHwnd, out _) : 0;
+                uint currentThreadId = GetCurrentThreadId();
+                bool attached = foregroundThreadId != 0 && foregroundThreadId != currentThreadId
+                    && AttachThreadInput(currentThreadId, foregroundThreadId, true);
+
+                try
+                {
+                    BringWindowToTop(window.Handle);
+                    for (int attempt = 0; attempt < 4; attempt++)
+                    {
+                        _ = SetForegroundWindow(window.Handle);
+                        if (GetForegroundWindow() == window.Handle)
+                        {
+                            return true;
+                        }
+
+                        Thread.Sleep(40);
+                    }
+
+                    return GetForegroundWindow() == window.Handle;
+                }
+                finally
+                {
+                    if (attached)
+                    {
+                        AttachThreadInput(currentThreadId, foregroundThreadId, false);
+                    }
+                }
             }
             catch
             {
@@ -341,7 +417,21 @@ namespace SharpestLlmStudio.Monitoring
         {
             screenPoint = Point.Empty;
 
-            if (!this.TryGetWindowInfo(window.Handle, out var refreshedWindow) || refreshedWindow == null)
+            MarkedWindowInfo? refreshedWindow = null;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                if (this.TryGetWindowInfo(window.Handle, out refreshedWindow) && refreshedWindow != null)
+                {
+                    break;
+                }
+
+                if (attempt < 2)
+                {
+                    Thread.Sleep(80);
+                }
+            }
+
+            if (refreshedWindow == null)
             {
                 return false;
             }
@@ -368,7 +458,7 @@ namespace SharpestLlmStudio.Monitoring
                 return false;
             }
 
-            if (!SetCursorPos(screenPoint.X, screenPoint.Y))
+            if (!TryMoveCursorForClick(screenPoint))
             {
                 return false;
             }
@@ -382,6 +472,153 @@ namespace SharpestLlmStudio.Monitoring
             return success;
         }
 
+        public bool TryExecuteKeyboardCommand(MarkedWindowInfo window, ParsedKeyboardCommand command, bool activateWindow = true, bool useBackgroundInput = false)
+        {
+            if (!this.TryGetWindowInfo(window.Handle, out var refreshedWindow) || refreshedWindow == null)
+            {
+                return false;
+            }
+
+            if (activateWindow)
+            {
+                this.TryActivateWindow(refreshedWindow);
+                Thread.Sleep(80);
+            }
+
+            if (command.Action == KeyboardAction.Type)
+            {
+                string text = command.Text ?? string.Empty;
+                if (string.IsNullOrEmpty(text))
+                {
+                    return true;
+                }
+
+                foreach (char c in text)
+                {
+                    if (useBackgroundInput)
+                    {
+                        _ = PostMessage(refreshedWindow.Handle, WM_CHAR, (IntPtr)c, IntPtr.Zero);
+                    }
+                    else
+                    {
+                        short vk = VkKeyScan(c);
+                        if (vk == -1)
+                        {
+                            continue;
+                        }
+
+                        byte keyCode = (byte)(vk & 0xFF);
+                        byte shiftState = (byte)((vk >> 8) & 0xFF);
+                        if ((shiftState & 1) != 0) keybd_event(VK_SHIFT, 0, 0, UIntPtr.Zero);
+                        if ((shiftState & 2) != 0) keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
+                        if ((shiftState & 4) != 0) keybd_event(VK_MENU, 0, 0, UIntPtr.Zero);
+
+                        keybd_event(keyCode, 0, 0, UIntPtr.Zero);
+                        keybd_event(keyCode, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+
+                        if ((shiftState & 4) != 0) keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                        if ((shiftState & 2) != 0) keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                        if ((shiftState & 1) != 0) keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    }
+                }
+
+                return true;
+            }
+
+            var keys = new List<byte>();
+            foreach (string keyName in command.Keys)
+            {
+                if (!TryMapVirtualKey(keyName, out byte keyCode))
+                {
+                    return false;
+                }
+
+                if (!keys.Contains(keyCode))
+                {
+                    keys.Add(keyCode);
+                }
+            }
+
+            if (keys.Count == 0)
+            {
+                return false;
+            }
+
+            if (command.Action == KeyboardAction.Down)
+            {
+                foreach (byte key in keys)
+                {
+                    if (useBackgroundInput)
+                    {
+                        _ = PostMessage(refreshedWindow.Handle, WM_KEYDOWN, (IntPtr)key, IntPtr.Zero);
+                    }
+                    else
+                    {
+                        keybd_event(key, 0, 0, UIntPtr.Zero);
+                    }
+
+                    this.heldKeyboardKeys.Add(key);
+                }
+
+                this.heldKeyboardKeysBackground = useBackgroundInput;
+                this.heldKeyboardWindowHandle = refreshedWindow.Handle;
+                return true;
+            }
+
+            if (command.Action == KeyboardAction.Up)
+            {
+                for (int i = keys.Count - 1; i >= 0; i--)
+                {
+                    byte key = keys[i];
+                    if (useBackgroundInput)
+                    {
+                        _ = PostMessage(refreshedWindow.Handle, WM_KEYUP, (IntPtr)key, IntPtr.Zero);
+                    }
+                    else
+                    {
+                        keybd_event(key, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    }
+
+                    this.heldKeyboardKeys.Remove(key);
+                }
+
+                if (this.heldKeyboardKeys.Count == 0)
+                {
+                    this.heldKeyboardKeysBackground = false;
+                    this.heldKeyboardWindowHandle = null;
+                }
+
+                return true;
+            }
+
+            foreach (byte key in keys)
+            {
+                if (useBackgroundInput)
+                {
+                    _ = PostMessage(refreshedWindow.Handle, WM_KEYDOWN, (IntPtr)key, IntPtr.Zero);
+                }
+                else
+                {
+                    keybd_event(key, 0, 0, UIntPtr.Zero);
+                }
+            }
+
+            for (int i = keys.Count - 1; i >= 0; i--)
+            {
+                byte key = keys[i];
+                if (useBackgroundInput)
+                {
+                    _ = PostMessage(refreshedWindow.Handle, WM_KEYUP, (IntPtr)key, IntPtr.Zero);
+                }
+                else
+                {
+                    keybd_event(key, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                }
+            }
+
+            return true;
+        }
+
         private bool TryForegroundPointerActionWithCursorRestore(MarkedWindowInfo window, ClickPoint clickPoint, PointerAction action, bool includeWindowChrome, out Point screenPoint)
         {
             screenPoint = this.ConvertToScreenPoint(window, clickPoint, includeWindowChrome);
@@ -392,37 +629,37 @@ namespace SharpestLlmStudio.Monitoring
 
             bool hadOriginalCursor = GetCursorPos(out POINT originalCursor);
 
-            if (!this.TryActivateWindow(window))
-            {
-                return false;
-            }
+            this.TryActivateWindow(window);
+            Thread.Sleep(150);
 
-            Thread.Sleep(100);
-
-            if (!SetCursorPos(screenPoint.X, screenPoint.Y))
-            {
-                return false;
-            }
-
-            bool success = false;
+            bool foregroundSuccess = false;
             try
             {
-                success = this.TryForegroundPointerAction(window, action, screenPoint);
-                return success;
+                if (TryMoveCursorForClick(screenPoint))
+                {
+                    foregroundSuccess = this.TryForegroundPointerAction(window, action, screenPoint);
+                }
+            }
+            catch
+            {
             }
             finally
             {
+                Thread.Sleep(90);
                 if (hadOriginalCursor)
                 {
-                    try
-                    {
-                        SetCursorPos(originalCursor.X, originalCursor.Y);
-                    }
-                    catch
-                    {
-                    }
+                    try { SetCursorPos(originalCursor.X, originalCursor.Y); } catch { }
                 }
             }
+
+            if (foregroundSuccess)
+            {
+                return true;
+            }
+
+            // Foreground approach failed (cursor couldn't be positioned or click didn't land).
+            // Fall back to PostMessage-based background click which doesn't require cursor or foreground.
+            return this.TryBackgroundPointerAction(window, clickPoint, action, includeWindowChrome, out screenPoint);
         }
 
         public void ReleaseHeldPointer()
@@ -463,6 +700,103 @@ namespace SharpestLlmStudio.Monitoring
             }
         }
 
+        public void ReleaseHeldKeyboard()
+        {
+            if (this.heldKeyboardKeys.Count == 0)
+            {
+                return;
+            }
+
+            try
+            {
+                var keys = new List<byte>(this.heldKeyboardKeys);
+                for (int i = keys.Count - 1; i >= 0; i--)
+                {
+                    byte key = keys[i];
+                    if (this.heldKeyboardKeysBackground && this.heldKeyboardWindowHandle.HasValue)
+                    {
+                        _ = PostMessage(this.heldKeyboardWindowHandle.Value, WM_KEYUP, (IntPtr)key, IntPtr.Zero);
+                    }
+                    else
+                    {
+                        keybd_event(key, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    }
+                }
+            }
+            catch
+            {
+            }
+            finally
+            {
+                this.heldKeyboardKeys.Clear();
+                this.heldKeyboardKeysBackground = false;
+                this.heldKeyboardWindowHandle = null;
+            }
+        }
+
+        public void ReleaseHeldInputs()
+        {
+            this.ReleaseHeldPointer();
+            this.ReleaseHeldKeyboard();
+        }
+
+        private static bool TryMapVirtualKey(string rawKey, out byte virtualKey)
+        {
+            virtualKey = 0;
+            string key = rawKey?.Trim().ToLowerInvariant() ?? string.Empty;
+            if (key.Length == 1)
+            {
+                char ch = key[0];
+                if (ch >= 'a' && ch <= 'z')
+                {
+                    virtualKey = (byte)char.ToUpperInvariant(ch);
+                    return true;
+                }
+
+                if (ch >= '0' && ch <= '9')
+                {
+                    virtualKey = (byte)ch;
+                    return true;
+                }
+            }
+
+            if (key.StartsWith('f') && key.Length <= 3 && int.TryParse(key[1..], out int fKey) && fKey >= 1 && fKey <= 24)
+            {
+                virtualKey = (byte)(0x6F + fKey);
+                return true;
+            }
+
+            return key switch
+            {
+                "ctrl" or "control" => AssignVirtualKey(VK_CONTROL, out virtualKey),
+                "shift" => AssignVirtualKey(VK_SHIFT, out virtualKey),
+                "alt" => AssignVirtualKey(VK_MENU, out virtualKey),
+                "win" or "windows" => AssignVirtualKey(VK_LWIN, out virtualKey),
+                "enter" or "return" => AssignVirtualKey(VK_RETURN, out virtualKey),
+                "tab" => AssignVirtualKey(VK_TAB, out virtualKey),
+                "esc" or "escape" => AssignVirtualKey(VK_ESCAPE, out virtualKey),
+                "space" => AssignVirtualKey(VK_SPACE, out virtualKey),
+                "backspace" => AssignVirtualKey(VK_BACK, out virtualKey),
+                "delete" or "del" => AssignVirtualKey(VK_DELETE, out virtualKey),
+                "insert" or "ins" => AssignVirtualKey(VK_INSERT, out virtualKey),
+                "home" => AssignVirtualKey(VK_HOME, out virtualKey),
+                "end" => AssignVirtualKey(VK_END, out virtualKey),
+                "pageup" or "pgup" => AssignVirtualKey(VK_PRIOR, out virtualKey),
+                "pagedown" or "pgdn" => AssignVirtualKey(VK_NEXT, out virtualKey),
+                "up" or "arrowup" => AssignVirtualKey(VK_UP, out virtualKey),
+                "down" or "arrowdown" => AssignVirtualKey(VK_DOWN, out virtualKey),
+                "left" or "arrowleft" => AssignVirtualKey(VK_LEFT, out virtualKey),
+                "right" or "arrowright" => AssignVirtualKey(VK_RIGHT, out virtualKey),
+                _ => false
+            };
+        }
+
+        private static bool AssignVirtualKey(byte key, out byte virtualKey)
+        {
+            virtualKey = key;
+            return true;
+        }
+
         private bool TryForegroundPointerAction(MarkedWindowInfo window, PointerAction action, Point screenPoint)
         {
             switch (action)
@@ -470,7 +804,11 @@ namespace SharpestLlmStudio.Monitoring
                 case PointerAction.Down:
                     if (!this.leftButtonHeld)
                     {
-                        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+                        if (!TrySendForegroundMouseAction(screenPoint, PointerAction.Down))
+                        {
+                            return false;
+                        }
+
                         this.leftButtonHeld = true;
                     }
 
@@ -484,7 +822,11 @@ namespace SharpestLlmStudio.Monitoring
                         this.ReleaseHeldPointer();
                     }
 
-                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                    if (!TrySendForegroundMouseAction(screenPoint, PointerAction.Up))
+                    {
+                        return false;
+                    }
+
                     this.leftButtonHeld = false;
                     this.leftButtonHeldBackground = false;
                     this.leftButtonHeldWindowHandle = null;
@@ -494,17 +836,17 @@ namespace SharpestLlmStudio.Monitoring
                     if (this.leftButtonHeld)
                     {
                         this.ReleaseHeldPointer();
-                        if (!SetCursorPos(screenPoint.X, screenPoint.Y))
+                        if (!TryMoveCursorForClick(screenPoint))
                         {
                             return false;
                         }
                     }
 
-                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
-                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
-                    Thread.Sleep(40);
-                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
-                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                    if (!TrySendForegroundMouseAction(screenPoint, PointerAction.DoubleClick))
+                    {
+                        return false;
+                    }
+
                     this.leftButtonHeld = false;
                     this.leftButtonHeldBackground = false;
                     this.leftButtonHeldWindowHandle = null;
@@ -514,19 +856,148 @@ namespace SharpestLlmStudio.Monitoring
                     if (this.leftButtonHeld)
                     {
                         this.ReleaseHeldPointer();
-                        if (!SetCursorPos(screenPoint.X, screenPoint.Y))
+                        if (!TryMoveCursorForClick(screenPoint))
                         {
                             return false;
                         }
                     }
 
-                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
-                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+                    if (!TrySendForegroundMouseAction(screenPoint, PointerAction.Click))
+                    {
+                        return false;
+                    }
+
                     this.leftButtonHeld = false;
                     this.leftButtonHeldBackground = false;
                     this.leftButtonHeldWindowHandle = null;
                     return true;
             }
+        }
+
+        private static bool TrySendForegroundMouseAction(Point screenPoint, PointerAction action)
+        {
+            if (!TryMoveCursorForClick(screenPoint))
+            {
+                return false;
+            }
+
+            switch (action)
+            {
+                case PointerAction.Down:
+                    return TrySendMouseButtonInput(MOUSEEVENTF_LEFTDOWN);
+
+                case PointerAction.Up:
+                    return TrySendMouseButtonInput(MOUSEEVENTF_LEFTUP);
+
+                case PointerAction.DoubleClick:
+                    if (!TrySendMouseButtonInput(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP))
+                    {
+                        return false;
+                    }
+
+                    Thread.Sleep(Math.Max(40, Math.Min(120, (int)GetDoubleClickTime() / 3)));
+                    return TrySendMouseButtonInput(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP);
+
+                default:
+                    return TrySendMouseButtonInput(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP);
+            }
+        }
+
+        private static bool TryMoveCursorForClick(Point screenPoint)
+        {
+            int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            int virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            int virtualWidth = Math.Max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN));
+            int virtualHeight = Math.Max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN));
+
+            int absoluteX = (int)Math.Round(((screenPoint.X - virtualLeft) * 65535.0) / Math.Max(1, virtualWidth - 1));
+            int absoluteY = (int)Math.Round(((screenPoint.Y - virtualTop) * 65535.0) / Math.Max(1, virtualHeight - 1));
+
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                _ = SetCursorPos(screenPoint.X, screenPoint.Y);
+
+                var input = new INPUT
+                {
+                    type = INPUT_MOUSE,
+                    U = new InputUnion
+                    {
+                        mi = new MOUSEINPUT
+                        {
+                            dx = absoluteX,
+                            dy = absoluteY,
+                            mouseData = 0,
+                            dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                            time = 0,
+                            dwExtraInfo = IntPtr.Zero
+                        }
+                    }
+                };
+
+                _ = SendInput(1, [input], Marshal.SizeOf<INPUT>());
+                Thread.Sleep(attempt == 0 ? 50 : 80);
+
+                if (!GetCursorPos(out POINT actual))
+                {
+                    return true;
+                }
+
+                if (Math.Abs(actual.X - screenPoint.X) <= 4 && Math.Abs(actual.Y - screenPoint.Y) <= 4)
+                {
+                    return true;
+                }
+            }
+
+            // Final fallback: accept cursor even if slightly off — the click target area is usually larger than a few pixels
+            if (GetCursorPos(out POINT finalPos))
+            {
+                return Math.Abs(finalPos.X - screenPoint.X) <= 12 && Math.Abs(finalPos.Y - screenPoint.Y) <= 12;
+            }
+
+            return false;
+        }
+
+        private static bool TrySendMouseButtonInput(params uint[] flags)
+        {
+            if (flags == null || flags.Length == 0)
+            {
+                return false;
+            }
+
+            var inputs = new INPUT[flags.Length];
+            for (int i = 0; i < flags.Length; i++)
+            {
+                inputs[i] = new INPUT
+                {
+                    type = INPUT_MOUSE,
+                    U = new InputUnion
+                    {
+                        mi = new MOUSEINPUT
+                        {
+                            dx = 0,
+                            dy = 0,
+                            mouseData = 0,
+                            dwFlags = flags[i],
+                            time = 0,
+                            dwExtraInfo = IntPtr.Zero
+                        }
+                    }
+                };
+            }
+
+            uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+            if (sent == inputs.Length)
+            {
+                Thread.Sleep(40);
+                return true;
+            }
+
+            foreach (uint flag in flags)
+            {
+                mouse_event(flag, 0, 0, 0, UIntPtr.Zero);
+            }
+
+            return true;
         }
 
         private bool TryBackgroundPointerAction(MarkedWindowInfo window, ClickPoint clickPoint, PointerAction action, bool includeWindowChrome, out Point screenPoint)
@@ -1072,9 +1543,40 @@ namespace SharpestLlmStudio.Monitoring
         private const int WM_LBUTTONDOWN = 0x0201;
         private const int WM_LBUTTONUP = 0x0202;
         private const int WM_LBUTTONDBLCLK = 0x0203;
+        private const int WM_KEYDOWN = 0x0100;
+        private const int WM_KEYUP = 0x0101;
+        private const int WM_CHAR = 0x0102;
+        private const int SM_XVIRTUALSCREEN = 76;
+        private const int SM_YVIRTUALSCREEN = 77;
+        private const int SM_CXVIRTUALSCREEN = 78;
+        private const int SM_CYVIRTUALSCREEN = 79;
+        private const int INPUT_MOUSE = 0;
+        private const uint MOUSEEVENTF_MOVE = 0x0001;
         private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
         private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+        private const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
+        private const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
+        private const uint KEYEVENTF_KEYUP = 0x0002;
         private const int MK_LBUTTON = 0x0001;
+        private const byte VK_BACK = 0x08;
+        private const byte VK_TAB = 0x09;
+        private const byte VK_RETURN = 0x0D;
+        private const byte VK_SHIFT = 0x10;
+        private const byte VK_CONTROL = 0x11;
+        private const byte VK_MENU = 0x12;
+        private const byte VK_ESCAPE = 0x1B;
+        private const byte VK_SPACE = 0x20;
+        private const byte VK_PRIOR = 0x21;
+        private const byte VK_NEXT = 0x22;
+        private const byte VK_END = 0x23;
+        private const byte VK_HOME = 0x24;
+        private const byte VK_LEFT = 0x25;
+        private const byte VK_UP = 0x26;
+        private const byte VK_RIGHT = 0x27;
+        private const byte VK_DOWN = 0x28;
+        private const byte VK_INSERT = 0x2D;
+        private const byte VK_DELETE = 0x2E;
+        private const byte VK_LWIN = 0x5B;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT
@@ -1090,6 +1592,31 @@ namespace SharpestLlmStudio.Monitoring
         {
             public int X;
             public int Y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct INPUT
+        {
+            public int type;
+            public InputUnion U;
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
+        private struct InputUnion
+        {
+            [FieldOffset(0)]
+            public MOUSEINPUT mi;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MOUSEINPUT
+        {
+            public int dx;
+            public int dy;
+            public uint mouseData;
+            public uint dwFlags;
+            public uint time;
+            public IntPtr dwExtraInfo;
         }
 
         private static IntPtr MakeLParam(int low, int high)
@@ -1136,6 +1663,10 @@ namespace SharpestLlmStudio.Monitoring
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool BringWindowToTop(nint hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetCursorPos(int x, int y);
 
         [DllImport("user32.dll")]
@@ -1143,7 +1674,22 @@ namespace SharpestLlmStudio.Monitoring
         private static extern bool GetCursorPos(out POINT lpPoint);
 
         [DllImport("user32.dll")]
+        private static extern uint GetDoubleClickTime();
+
+        [DllImport("user32.dll")]
         private static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+        [DllImport("user32.dll")]
+        private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+        [DllImport("user32.dll")]
+        private static extern short VkKeyScan(char ch);
+
+        [DllImport("user32.dll")]
+        private static extern int GetSystemMetrics(int nIndex);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr PostMessage(nint hWnd, int msg, IntPtr wParam, IntPtr lParam);
@@ -1151,5 +1697,15 @@ namespace SharpestLlmStudio.Monitoring
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool PrintWindow(nint hwnd, IntPtr hdcBlt, uint nFlags);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint GetWindowThreadProcessId(nint hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
     }
 }

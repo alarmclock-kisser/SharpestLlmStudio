@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Runtime.Versioning;
 using System.Text;
 using System.Text.Json;
@@ -12,22 +13,43 @@ using SharpestLlmStudio.Shared;
 
 namespace SharpestLlmStudio.WebApp.ViewModels
 {
+    [SupportedOSPlatform("windows")]
     public partial class HomeViewModel
     {
         private readonly ScreenClicker Clicker;
         private readonly List<string> clickerHistory = [];
         private readonly List<ClickerProtectedZone> clickerProtectedZones = [];
+        private readonly List<string> clickerPendingQuestionOptions = [];
+        private enum WebChatClipboardStage
+        {
+            None,
+            Image,
+            Text,
+            AwaitingResult
+        }
+
         private ScreenClicker.MarkedWindowInfo? clickerMarkedWindow;
         private CancellationTokenSource? clickerLoopCts;
+        private TaskCompletionSource<string?>? clickerPendingQuestionTcs;
         private string? clickerLastScreenshotPath;
-        private const int ClickerHistoryMaxEntries = 8;
+        private string clickerLastErrorFeedback = string.Empty;
+        private string clickerLiveUserNote = string.Empty;
+        private string webChatPreparedPromptText = string.Empty;
+        private string webChatPreparedImageKey = string.Empty;
+        private string webChatLastImportedResponse = string.Empty;
+        private WebChatClipboardStage webChatClipboardStage = WebChatClipboardStage.None;
+        private LlamaChatMessage? webChatPendingAssistantMessage;
+        private int clickerConsecutiveFailures;
+        private const int ClickerHistoryMaxEntries = 12;
         private const string ClickerPreviewStageElementId = "clicker-preview-stage";
         private const string DefaultClickerProtectedZoneModelWarning = "Protected zones mark areas the user does not want clicked. Do not choose targets inside those protected zones.";
 
         public string ClickerInstructions { get; set; } = "Click the next required UI element for the described task. Prefer the primary actionable control and avoid decorative elements.";
-        public int ClickerLoopIntervalMs { get; set; } = 2500;
+        public string ClickerInstructionsDraft { get; set; } = "Click the next required UI element for the described task. Prefer the primary actionable control and avoid decorative elements.";
+        public int ClickerLoopIntervalMs { get; set; } = 1000;
         public int ClickerWindowMarkDelaySeconds { get; set; } = 3;
         public int ClickerPreviewScalePercent { get; set; } = 30;
+        public int ClickerModelImageScalePercent { get; set; } = 100;
         public bool ClickerIncludeWindowChrome { get; set; } = false;
         public bool ClickerShowPreviewMarker { get; set; } = true;
         public bool ClickerActivateWindowBeforeCapture { get; set; } = true;
@@ -37,6 +59,13 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public bool ClickerRequirePointInsideWindow { get; set; } = true;
         public bool ClickerUseChatInputAsLiveNote { get; set; } = true;
         public bool ClickerTellModelAboutProtectedZones { get; set; } = false;
+        public bool ClickerSendLastErrorToModel { get; set; } = false;
+        public bool ClickerAllowModelQuestions { get; set; } = true;
+        public bool ClickerLimitInteractionRegion { get; set; } = false;
+        public int ClickerInteractionMinX { get; set; } = 0;
+        public int ClickerInteractionMinY { get; set; } = 0;
+        public int ClickerInteractionMaxX { get; set; } = 0;
+        public int ClickerInteractionMaxY { get; set; } = 0;
         public bool IsClickerBusy { get; private set; }
         public bool IsClickerProtectedZoneSelectionActive { get; private set; }
         public bool IsClickerLoopRunning => this.clickerLoopCts != null && !this.clickerLoopCts.IsCancellationRequested;
@@ -53,6 +82,42 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public int ClickerIterationCount { get; private set; }
         public DateTime? ClickerLastRunAtUtc { get; private set; }
         public string ClickerMarkedWindowLabel => this.clickerMarkedWindow?.DisplayLabel ?? "No window marked.";
+        public string ClickerLastErrorFeedback => this.clickerLastErrorFeedback;
+        public bool CanImportWebChatResponse => this.UseWebChatProvider && this.webChatClipboardStage == WebChatClipboardStage.AwaitingResult;
+        public bool HasPendingClickerQuestion => this.clickerPendingQuestionTcs != null && (this.clickerPendingQuestionOptions.Count > 0 || this.ClickerPendingQuestionAddTextOption);
+        public string ClickerPendingQuestionTitle { get; private set; } = string.Empty;
+        public string ClickerPendingQuestionText { get; private set; } = string.Empty;
+        public string ClickerPendingQuestionKind { get; private set; } = "question";
+        public bool ClickerPendingQuestionAddTextOption { get; private set; }
+        public string ClickerPendingQuestionTextLabel { get; private set; } = "Your answer";
+        public string ClickerPendingQuestionTextPlaceholder { get; private set; } = string.Empty;
+        public string ClickerPendingQuestionSubmitText { get; private set; } = "Send answer";
+        public string ClickerPendingQuestionTextAnswer { get; set; } = string.Empty;
+        public IEnumerable<string> ClickerPendingQuestionOptions => this.clickerPendingQuestionOptions;
+        public string ClickerPendingQuestionIcon => this.ClickerPendingQuestionKind switch
+        {
+            "warning" => "warning",
+            "danger" or "error" => "error",
+            "success" => "check_circle",
+            "info" => "info",
+            _ => "help"
+        };
+        public string ClickerPendingQuestionAccentColor => this.ClickerPendingQuestionKind switch
+        {
+            "warning" => "#f59e0b",
+            "danger" or "error" => "#dc2626",
+            "success" => "#16a34a",
+            "info" => "#2563eb",
+            _ => "#7c3aed"
+        };
+        public string ClickerPendingQuestionSurfaceColor => this.ClickerPendingQuestionKind switch
+        {
+            "warning" => "#fff7ed",
+            "danger" or "error" => "#fef2f2",
+            "success" => "#f0fdf4",
+            "info" => "#eff6ff",
+            _ => "#f5f3ff"
+        };
         public bool HasClickerPreviewMarker => this.ClickerPreviewMarkerLeftPercent.HasValue && this.ClickerPreviewMarkerTopPercent.HasValue;
         public IEnumerable<ClickerProtectedZone> ClickerProtectedZones => this.clickerProtectedZones
             .OrderBy(z => z.Name, StringComparer.OrdinalIgnoreCase);
@@ -60,6 +125,111 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             .Where(z => z.IncludeWindowChrome == this.ClickerIncludeWindowChrome)
             .OrderBy(z => z.Name, StringComparer.OrdinalIgnoreCase);
         public int ClickerProtectedZoneCount => this.clickerProtectedZones.Count;
+        public string ClickerInteractionRegionLabel
+        {
+            get
+            {
+                if (this.clickerMarkedWindow == null)
+                {
+                    return "No window marked.";
+                }
+
+                Rectangle bounds = this.GetClickerEffectiveReferenceBounds(this.clickerMarkedWindow, this.ClickerIncludeWindowChrome);
+                return $"{bounds.Left},{bounds.Top} {bounds.Width}x{bounds.Height}";
+            }
+        }
+
+        public void CommitClickerInstructionsDraft()
+        {
+            string draft = this.ClickerInstructionsDraft?.Trim() ?? string.Empty;
+            if (string.Equals(this.ClickerInstructions, draft, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(draft))
+            {
+                this.LastActionMessage = "Clicker prompt cannot be empty.";
+                this.RequestUiRefresh();
+                return;
+            }
+
+            this.ClickerInstructions = draft;
+            this.LastActionMessage = "Clicker prompt updated.";
+            this.RequestUiRefresh();
+        }
+
+        public void SelectClickerQuestionOption(string option)
+        {
+            if (this.clickerPendingQuestionTcs == null)
+            {
+                return;
+            }
+
+            this.clickerPendingQuestionTcs.TrySetResult(option);
+        }
+
+        public void SubmitClickerQuestionTextAnswer()
+        {
+            if (this.clickerPendingQuestionTcs == null || string.IsNullOrWhiteSpace(this.ClickerPendingQuestionTextAnswer))
+            {
+                return;
+            }
+
+            this.clickerPendingQuestionTcs.TrySetResult(this.ClickerPendingQuestionTextAnswer.Trim());
+        }
+
+        public void CancelPendingClickerQuestion()
+        {
+            this.clickerPendingQuestionTcs?.TrySetResult(null);
+            this.clickerPendingQuestionTcs = null;
+            this.ClickerPendingQuestionTitle = string.Empty;
+            this.ClickerPendingQuestionText = string.Empty;
+            this.ClickerPendingQuestionKind = "question";
+            this.ClickerPendingQuestionAddTextOption = false;
+            this.ClickerPendingQuestionTextLabel = "Your answer";
+            this.ClickerPendingQuestionTextPlaceholder = string.Empty;
+            this.ClickerPendingQuestionSubmitText = "Send answer";
+            this.ClickerPendingQuestionTextAnswer = string.Empty;
+            this.clickerPendingQuestionOptions.Clear();
+            this.RequestUiRefresh();
+        }
+
+        private async Task<string?> AwaitClickerQuestionAnswerAsync(ClickerUserQuestion question, CancellationToken cancellationToken)
+        {
+            this.clickerPendingQuestionTcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            this.ClickerPendingQuestionTitle = string.IsNullOrWhiteSpace(question.Title) ? "Question from model" : question.Title.Trim();
+            this.ClickerPendingQuestionText = question.Question.Trim();
+            this.ClickerPendingQuestionKind = string.IsNullOrWhiteSpace(question.Kind) ? "question" : question.Kind.Trim().ToLowerInvariant();
+            this.ClickerPendingQuestionAddTextOption = question.AddTextOption;
+            this.ClickerPendingQuestionTextLabel = string.IsNullOrWhiteSpace(question.TextLabel) ? "Your answer" : question.TextLabel.Trim();
+            this.ClickerPendingQuestionTextPlaceholder = question.TextPlaceholder?.Trim() ?? string.Empty;
+            this.ClickerPendingQuestionSubmitText = string.IsNullOrWhiteSpace(question.SubmitText) ? "Send answer" : question.SubmitText.Trim();
+            this.ClickerPendingQuestionTextAnswer = string.Empty;
+            this.clickerPendingQuestionOptions.Clear();
+            this.clickerPendingQuestionOptions.AddRange(question.Options);
+            this.RequestUiRefresh();
+
+            using var registration = cancellationToken.Register(() => this.clickerPendingQuestionTcs?.TrySetCanceled(cancellationToken));
+
+            try
+            {
+                string? result = await this.clickerPendingQuestionTcs.Task;
+                return result;
+            }
+            catch (OperationCanceledException)
+            {
+                return null;
+            }
+            finally
+            {
+                this.clickerPendingQuestionTcs = null;
+                this.ClickerPendingQuestionTitle = string.Empty;
+                this.ClickerPendingQuestionText = string.Empty;
+                this.clickerPendingQuestionOptions.Clear();
+                this.RequestUiRefresh();
+            }
+        }
 
         [SupportedOSPlatform("windows")]
         public async Task MarkClickerWindowAsync()
@@ -86,6 +256,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 bool windowChanged = this.clickerMarkedWindow == null || this.clickerMarkedWindow.Handle != window.Handle;
                 this.clickerMarkedWindow = window;
+                this.ResetClickerInteractionRegionToReferenceBounds(window);
                 if (windowChanged)
                 {
                     this.ClearClickerProtectedZonesInternal();
@@ -102,7 +273,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         public void ClearClickerWindow()
         {
-            this.Clicker.ReleaseHeldPointer();
+            this.Clicker.ReleaseHeldInputs();
             this.clickerMarkedWindow = null;
             this.IsClickerProtectedZoneSelectionActive = false;
             this.ClickerScreenshotDataUrl = null;
@@ -113,10 +284,15 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.ClickerLastReason = string.Empty;
             this.ClickerLastTargetScreenPoint = string.Empty;
             this.ClickerLastConfirmationOutcome = string.Empty;
+            this.clickerLastErrorFeedback = string.Empty;
+            this.clickerLiveUserNote = string.Empty;
+            this.clickerConsecutiveFailures = 0;
             this.ClickerPreviewMarkerLeftPercent = null;
             this.ClickerPreviewMarkerTopPercent = null;
             this.clickerHistory.Clear();
             this.ClearClickerProtectedZonesInternal();
+            this.ResetClickerInteractionRegionToDefaults();
+            this.CancelPendingClickerQuestion();
             try
             {
                 _ = this.Js.InvokeVoidAsync("sharpestNavMenu.cancelClickerProtectedZoneSelection");
@@ -251,7 +427,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             this.clickerLoopCts?.Dispose();
             this.clickerLoopCts = new CancellationTokenSource();
-            CancellationTokenSource loopCts = this.clickerLoopCts;
+            CancellationTokenSource loopCts = this.clickerLoopCts ?? throw new InvalidOperationException("Clicker loop source was not initialized.");
             CancellationToken token = loopCts.Token;
             this.ClickerIterationCount = 0;
             this.LastActionMessage = "Clicker loop started.";
@@ -309,7 +485,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
             }
 
-            this.Clicker.ReleaseHeldPointer();
+            this.Clicker.ReleaseHeldInputs();
+            this.CancelPendingClickerQuestion();
 
             this.LastActionMessage = "Clicker loop stopping...";
             this.RequestUiRefresh();
@@ -328,7 +505,18 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             if (!this.IsLoaded)
             {
-                this.LastActionMessage = "Load a model before starting the Clicker.";
+                this.LastActionMessage = this.UseWebChatProvider
+                    ? "Load a multimodal local model before starting the Clicker browser automation loop."
+                    : "Load a model before starting the Clicker.";
+                this.RequestUiRefresh();
+                return false;
+            }
+
+            bool hasVisionSupport = this.LoadedModel?.IsOmni == true
+                || (this.UseMmproj && !string.IsNullOrWhiteSpace(this.LoadedModel?.MmprojFilePath));
+            if (!hasVisionSupport)
+            {
+                this.LastActionMessage = "Clicker requires a multimodal model with mmproj enabled.";
                 this.RequestUiRefresh();
                 return false;
             }
@@ -351,6 +539,53 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             return true;
         }
 
+        private void ResetClickerInteractionRegionToDefaults()
+        {
+            this.ClickerInteractionMinX = 0;
+            this.ClickerInteractionMinY = 0;
+            this.ClickerInteractionMaxX = 0;
+            this.ClickerInteractionMaxY = 0;
+        }
+
+        private void ResetClickerInteractionRegionToReferenceBounds(ScreenClicker.MarkedWindowInfo window)
+        {
+            Rectangle bounds = this.Clicker.GetReferenceBounds(window, this.ClickerIncludeWindowChrome);
+            this.ClickerInteractionMinX = 0;
+            this.ClickerInteractionMinY = 0;
+            this.ClickerInteractionMaxX = Math.Max(1, bounds.Width);
+            this.ClickerInteractionMaxY = Math.Max(1, bounds.Height);
+        }
+
+        private Rectangle GetClickerEffectiveReferenceBounds(ScreenClicker.MarkedWindowInfo window, bool includeWindowChrome)
+        {
+            Rectangle baseBounds = this.Clicker.GetReferenceBounds(window, includeWindowChrome);
+            if (!this.ClickerLimitInteractionRegion || baseBounds.Width <= 1 || baseBounds.Height <= 1)
+            {
+                return baseBounds;
+            }
+
+            int minX = Math.Clamp(this.ClickerInteractionMinX, 0, Math.Max(0, baseBounds.Width - 1));
+            int minY = Math.Clamp(this.ClickerInteractionMinY, 0, Math.Max(0, baseBounds.Height - 1));
+            int rawMaxX = this.ClickerInteractionMaxX <= 0 ? baseBounds.Width : this.ClickerInteractionMaxX;
+            int rawMaxY = this.ClickerInteractionMaxY <= 0 ? baseBounds.Height : this.ClickerInteractionMaxY;
+            int maxX = Math.Clamp(rawMaxX, minX + 1, baseBounds.Width);
+            int maxY = Math.Clamp(rawMaxY, minY + 1, baseBounds.Height);
+
+            return new Rectangle(baseBounds.Left + minX, baseBounds.Top + minY, Math.Max(1, maxX - minX), Math.Max(1, maxY - minY));
+        }
+
+        private ScreenClicker.MarkedWindowInfo CreateClickerModelWindow(ScreenClicker.MarkedWindowInfo window)
+        {
+            Rectangle effectiveBounds = this.GetClickerEffectiveReferenceBounds(window, this.ClickerIncludeWindowChrome);
+            return new ScreenClicker.MarkedWindowInfo(window.Handle, window.Title, effectiveBounds, effectiveBounds);
+        }
+
+        private Point ConvertClickerModelPointToScreen(ScreenClicker.MarkedWindowInfo window, ScreenClicker.ClickPoint point)
+        {
+            ScreenClicker.MarkedWindowInfo modelWindow = this.CreateClickerModelWindow(window);
+            return this.Clicker.ConvertToScreenPoint(modelWindow, point, includeWindowChrome: false);
+        }
+
         [SupportedOSPlatform("windows")]
         private async Task ExecuteClickerIterationAsync(CancellationToken cancellationToken)
         {
@@ -362,9 +597,15 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.IsClickerBusy = true;
             this.RequestUiRefresh();
             bool shouldRestorePromptFocus = false;
+            nint savedForegroundWindow = IntPtr.Zero;
 
             try
             {
+                    if (this.UseWebChatProvider)
+                    {
+                        await this.PrepareWebChatClickerLoopStateAsync(cancellationToken);
+                    }
+
                 if (this.ClickerUseBackgroundClick)
                 {
                     try
@@ -374,6 +615,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     catch
                     {
                     }
+
+                    savedForegroundWindow = this.Clicker.GetCurrentForegroundWindowHandle();
                 }
 
                 var prepared = await this.TryPrepareClickerScreenshotAsync(window, cancellationToken);
@@ -383,43 +626,103 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 }
 
                 window = prepared.Window;
+                ScreenClicker.MarkedWindowInfo modelWindow = this.CreateClickerModelWindow(window);
 
-                string clickerSystemPrompt = this.BuildEffectiveSystemPrompt(
-                    "You are a careful UI pointer planner. Study the screenshot, the user goal, the current pointer state, protected zones, and the recent iteration history before deciding. Learn from previous successful or failed attempts instead of repeating them blindly. Return exactly one JSON object only. Include an optional action field. Supported actions are click, doubleclick, down, and up. If action is omitted, empty, or null, it means click. Use down and up to support drag-and-drop workflows. Prefer {\"point_2d\":[x,y],\"action\":\"click\",\"reason\":\"...\"}. Coordinates must refer to the attached screenshot and should usually be normalized to the 0..1000 scale. The reason should be grounded in visible UI evidence and should explain why this action advances the task, especially with respect to recent iteration history. If no safe target exists, return {\"point_2d\":[-1,-1],\"action\":null,\"reason\":\"not found\"}.");
+                string clickerSystemPrompt = SanitizeClickerPromptText(HomeViewModel.BuildCompactClickerSystemPrompt());
 
-                string? liveOperatorNote = this.ClickerUseChatInputAsLiveNote
-                    ? this.UserInput?.Trim()
-                    : null;
-
-                string clickerPrompt = this.BuildClickerPrompt(window, liveOperatorNote);
-                var request = new LlamaGenerationRequest
+                string? liveOperatorNote = null;
+                if (this.ClickerUseChatInputAsLiveNote)
                 {
-                    Prompt = clickerPrompt,
-                    SystemPrompt = clickerSystemPrompt,
-                    Images = [this.clickerLastScreenshotPath!],
-                    Isolated = true,
-                    PersistConversation = false,
-                    IncludeConversationHistory = false,
-                    MaxTokens = 384,
-                    Temperature = 0.15,
-                    TopP = 0.9,
-                    TopK = 40,
-                    MaxWidthAndHeight = 0,
-                    ImageFormat = "png",
-                    Stream = false
-                };
+                    string? currentInput = this.UserInput?.Trim();
+                    string? persistedNote = string.IsNullOrWhiteSpace(this.clickerLiveUserNote) ? null : this.clickerLiveUserNote.Trim();
+                    if (!string.IsNullOrWhiteSpace(currentInput) && !string.IsNullOrWhiteSpace(persistedNote))
+                    {
+                        liveOperatorNote = persistedNote + "\n" + currentInput;
+                    }
+                    else
+                    {
+                        liveOperatorNote = currentInput ?? persistedNote;
+                    }
 
-                var sb = new StringBuilder();
-                await foreach (string chunk in this.Client.GenerateAsync(request, cancellationToken))
+                    // Consume the persisted note so it is not repeated on subsequent iterations
+                    this.clickerLiveUserNote = string.Empty;
+                }
+                string? effectiveOperatorNote = liveOperatorNote;
+                if (this.UseWebChatProvider)
                 {
-                    sb.Append(chunk);
+                    string webChatNote = this.BuildWebChatClickerAutomationNote();
+                    effectiveOperatorNote = string.IsNullOrWhiteSpace(effectiveOperatorNote)
+                        ? webChatNote
+                        : effectiveOperatorNote.Trim() + "\n" + webChatNote;
                 }
 
-                string responseText = sb.ToString().Trim();
-                this.ClickerLastResponse = responseText;
-                this.ClickerLastRunAtUtc = DateTime.UtcNow;
+                int questionRound = 0;
+                int clickerModelMaxWidthAndHeight = this.GetClickerModelMaxWidthAndHeight(this.clickerLastScreenshotPath!);
 
-                if (!this.Clicker.TryParseClickPoint(responseText, window, this.ClickerIncludeWindowChrome, out var parsedCommand, out string normalizedJson, out string errorMessage) || parsedCommand == null)
+                string responseText;
+                while (true)
+                {
+                    string clickerPrompt = LimitClickerPromptText(SanitizeClickerPromptText(this.BuildClickerPrompt(modelWindow, effectiveOperatorNote)), 900);
+                    string clickerFallbackPrompt = LimitClickerPromptText(SanitizeClickerPromptText(this.BuildFallbackClickerPrompt(modelWindow, effectiveOperatorNote)), 520);
+                    await StaticLogger.LogAsync($"[Clicker] Prompt sizes: system={clickerSystemPrompt.Length}, user={clickerPrompt.Length}.");
+                    var request = new LlamaGenerationRequest
+                    {
+                        Prompt = clickerPrompt,
+                        SystemPrompt = clickerSystemPrompt,
+                        Images = [this.clickerLastScreenshotPath!],
+                        Isolated = true,
+                        PersistConversation = false,
+                        IncludeConversationHistory = false,
+                        MaxTokens = 384,
+                        Temperature = 0.15,
+                        TopP = 0.9,
+                        TopK = 40,
+                        MaxWidthAndHeight = clickerModelMaxWidthAndHeight,
+                        ImageFormat = "jpg",
+                        Stream = false
+                    };
+
+                    responseText = await this.GenerateClickerResponseAsync(request, clickerFallbackPrompt, cancellationToken);
+
+                    this.LastGenerationStats = this.Client.GetLastGenerationStatsSnapshot();
+                    await this.UpdateHardwareStatsAsync();
+                    this.ClickerLastResponse = responseText;
+                    this.ClickerLastRunAtUtc = DateTime.UtcNow;
+                    await StaticLogger.LogAsync($"[Clicker] Model raw response ({responseText.Length} chars): {TrimForHistory(responseText)}");
+
+                    if (!this.ClickerAllowModelQuestions || !this.TryParseClickerUserQuestion(responseText, out ClickerUserQuestion? question) || question == null)
+                    {
+                        break;
+                    }
+
+                    questionRound++;
+                    if (questionRound > 3)
+                    {
+                        this.clickerLastErrorFeedback = "Model asked too many follow-up questions in a row.";
+                        this.LastActionMessage = "Clicker stopped because the model asked too many questions in a row.";
+                        return;
+                    }
+
+                    this.ClickerLastParsedPoint = string.Empty;
+                    this.ClickerLastParsedAction = "Question";
+                    this.ClickerLastNormalizedJson = question.NormalizedJson;
+                    this.ClickerLastReason = question.Question;
+                    string? selectedOption = await this.AwaitClickerQuestionAnswerAsync(question, cancellationToken);
+                    if (string.IsNullOrWhiteSpace(selectedOption))
+                    {
+                        this.LastActionMessage = "Clicker question canceled.";
+                        return;
+                    }
+
+                    string userChoiceLine = $"User selected option: {selectedOption}";
+                    this.AppendClickerHistory(userChoiceLine);
+                    effectiveOperatorNote = string.IsNullOrWhiteSpace(effectiveOperatorNote)
+                        ? userChoiceLine
+                        : effectiveOperatorNote.Trim() + "\n" + userChoiceLine;
+                    this.clickerLastErrorFeedback = string.Empty;
+                }
+
+                if (!this.TryParseClickerPlan(responseText, modelWindow, includeWindowChrome: false, out List<ClickerPlanStep>? planSteps, out string normalizedJson, out string errorMessage) || planSteps == null || planSteps.Count == 0)
                 {
                     this.ClickerLastParsedPoint = string.Empty;
                     this.ClickerLastParsedAction = string.Empty;
@@ -427,21 +730,36 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     this.ClickerLastReason = string.IsNullOrWhiteSpace(responseText)
                         ? string.Empty
                         : responseText;
+                    this.clickerLastErrorFeedback = $"Parse failure: {errorMessage}. Raw response: {TrimForHistory(responseText)}";
                     this.AppendClickerHistory($"Model response could not be parsed: {TrimForHistory(responseText)}");
                     this.LastActionMessage = $"Clicker could not parse a valid point: {errorMessage}";
                     await StaticLogger.LogAsync($"[Clicker] Raw unparseable model response: {TrimForHistory(responseText)}");
+
+                    if (this.IsClickerLoopRunning)
+                    {
+                        this.clickerConsecutiveFailures++;
+                        if (this.clickerConsecutiveFailures >= 2)
+                        {
+                            this.StopClickerLoop();
+                            this.LastActionMessage = "Clicker loop stopped after repeated unparseable model responses.";
+                        }
+                    }
                     return;
                 }
 
-                var parsedPoint = parsedCommand.Point;
-                var parsedAction = parsedCommand.Action;
-                this.ClickerLastParsedPoint = parsedPoint.DisplayLabel;
-                this.ClickerLastParsedAction = parsedAction.ToString();
+                ClickerPlanStep? firstPointerStep = planSteps.FirstOrDefault(s => s.IsPointer);
+                this.ClickerLastParsedPoint = firstPointerStep?.Pointer?.DisplayLabel ?? string.Empty;
+                this.ClickerLastParsedAction = DescribeClickerPlan(planSteps);
                 this.ClickerLastNormalizedJson = normalizedJson;
                 this.ClickerLastReason = ExtractPreferredReason(normalizedJson, responseText);
-                await StaticLogger.LogAsync($"[Clicker] Parsed pointer command: action={parsedAction}, point={parsedPoint.DisplayLabel}, reason={TrimForHistory(this.ClickerLastReason)}");
+                await StaticLogger.LogAsync($"[Clicker] Parsed clicker plan: {this.ClickerLastParsedAction}. Reason={TrimForHistory(this.ClickerLastReason)}");
+                await StaticLogger.LogAsync($"[Clicker] Parsed plan step count: {planSteps.Count}. IncludeChrome={this.ClickerIncludeWindowChrome}, BackgroundInput={this.ClickerUseBackgroundClick}, ActivateWindow={this.ClickerActivateWindowBeforeCapture}, RequireInsideWindow={this.ClickerRequirePointInsideWindow}.");
+                for (int stepIndex = 0; stepIndex < planSteps.Count; stepIndex++)
+                {
+                    await StaticLogger.LogAsync($"[Clicker] Plan step {stepIndex + 1}/{planSteps.Count}: {DescribeClickerPlanStep(planSteps[stepIndex])}");
+                }
 
-                if (parsedPoint.X < 0 || parsedPoint.Y < 0)
+                if (planSteps.All(s => s.IsPointer && s.Pointer != null && (s.Pointer.X < 0 || s.Pointer.Y < 0)))
                 {
                     this.AppendClickerHistory($"No safe target found. Reason: {TrimForHistory(this.ClickerLastReason)}");
                     this.LastActionMessage = "Clicker response indicates that no safe target was found.";
@@ -449,49 +767,41 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     return;
                 }
 
-                Point screenPoint = this.Clicker.ConvertToScreenPoint(window, parsedPoint, this.ClickerIncludeWindowChrome);
-                this.ClickerLastTargetScreenPoint = $"{screenPoint.X}, {screenPoint.Y}";
-
-                var referenceBounds = this.Clicker.GetReferenceBounds(window, this.ClickerIncludeWindowChrome);
-                double markerLeft = referenceBounds.Width > 0
-                    ? ((screenPoint.X - referenceBounds.Left) / (double) referenceBounds.Width) * 100.0
-                    : 0.0;
-                double markerTop = referenceBounds.Height > 0
-                    ? ((screenPoint.Y - referenceBounds.Top) / (double) referenceBounds.Height) * 100.0
-                    : 0.0;
-                this.ClickerPreviewMarkerLeftPercent = Math.Clamp(markerLeft, 0.0, 100.0);
-                this.ClickerPreviewMarkerTopPercent = Math.Clamp(markerTop, 0.0, 100.0);
-
-                if (this.ClickerRequirePointInsideWindow && !this.Clicker.IsScreenPointInsideWindow(window, screenPoint, this.ClickerIncludeWindowChrome, margin: 2))
+                Point? firstPointerScreenPoint = null;
+                if (firstPointerStep?.Pointer != null)
                 {
-                    this.AppendClickerHistory($"Rejected out-of-bounds target {this.ClickerLastParsedPoint}. Reason: {TrimForHistory(this.ClickerLastReason)}");
-                    this.LastActionMessage = "Clicker rejected the target because it lies outside the marked window.";
-                    await StaticLogger.LogAsync($"[Clicker] Rejected target outside window bounds: action={parsedAction}, screenPoint={screenPoint.X},{screenPoint.Y}, window='{window.DisplayLabel}'.");
-                    return;
+                    Point previewPoint = this.ConvertClickerModelPointToScreen(window, firstPointerStep.Pointer);
+                    firstPointerScreenPoint = previewPoint;
+                    this.ClickerLastTargetScreenPoint = $"{previewPoint.X}, {previewPoint.Y}";
+
+                    var referenceBounds = this.GetClickerEffectiveReferenceBounds(window, this.ClickerIncludeWindowChrome);
+                    double markerLeft = referenceBounds.Width > 0
+                        ? ((previewPoint.X - referenceBounds.Left) / (double)referenceBounds.Width) * 100.0
+                        : 0.0;
+                    double markerTop = referenceBounds.Height > 0
+                        ? ((previewPoint.Y - referenceBounds.Top) / (double)referenceBounds.Height) * 100.0
+                        : 0.0;
+                    this.ClickerPreviewMarkerLeftPercent = Math.Clamp(markerLeft, 0.0, 100.0);
+                    this.ClickerPreviewMarkerTopPercent = Math.Clamp(markerTop, 0.0, 100.0);
                 }
-
-                if (this.TryFindBlockingProtectedZone(window, screenPoint, this.ClickerIncludeWindowChrome, out ClickerProtectedZone? protectedZone) && protectedZone != null)
+                else
                 {
-                    this.ClickerLastConfirmationOutcome = "Protected zone";
-                    this.AppendClickerHistory($"Blocked {this.ClickerLastParsedAction} target {this.ClickerLastParsedPoint} because it falls inside protected zone '{protectedZone.Name}'.");
-                    this.LastActionMessage = $"Clicker blocked the {this.ClickerLastParsedAction.ToLowerInvariant()} because it falls inside protected zone '{protectedZone.Name}'.";
-                    await StaticLogger.LogAsync($"[Clicker] Blocked target inside protected zone '{protectedZone.Name}': action={parsedAction}, screenPoint={screenPoint.X},{screenPoint.Y}.");
-                    return;
+                    this.ClickerLastTargetScreenPoint = string.Empty;
                 }
 
                 this.ClickerIterationCount++;
 
                 if (this.ClickerDryRun)
                 {
-                    this.AppendClickerHistory($"Dry run {this.ClickerLastParsedAction} target {this.ClickerLastParsedPoint}. Reason: {TrimForHistory(this.ClickerLastReason)}");
+                    this.AppendClickerHistory($"Dry run {this.ClickerLastParsedAction}. Reason: {TrimForHistory(this.ClickerLastReason)}");
                     this.ClickerLastConfirmationOutcome = "Dry run";
-                    this.LastActionMessage = $"Dry run: parsed {this.ClickerLastParsedAction.ToLowerInvariant()} target at {screenPoint.X}, {screenPoint.Y}.";
+                    this.LastActionMessage = $"Dry run: parsed plan {this.ClickerLastParsedAction}.";
                     return;
                 }
 
-                if (this.ClickerConfirmBeforeClick)
+                if (this.ClickerConfirmBeforeClick && firstPointerScreenPoint.HasValue)
                 {
-                    string confirmation = await this.AwaitClickerConfirmationAsync(screenPoint, cancellationToken);
+                    string confirmation = await this.AwaitClickerConfirmationAsync(firstPointerScreenPoint.Value, cancellationToken);
                     this.ClickerLastConfirmationOutcome = confirmation switch
                     {
                         "confirm" => "Confirmed",
@@ -523,28 +833,27 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     this.ClickerLastConfirmationOutcome = "Auto";
                 }
 
-                string executionMode = this.ClickerUseBackgroundClick
-                    ? (this.ClickerActivateWindowBeforeCapture && (parsedAction == ScreenClicker.PointerAction.Click || parsedAction == ScreenClicker.PointerAction.DoubleClick)
-                        ? "background-with-foreground-fallback"
-                        : "background-postmessage")
-                    : "foreground";
-
-                await StaticLogger.LogAsync($"[Clicker] Executing pointer action: action={parsedAction}, screenPoint={screenPoint.X},{screenPoint.Y}, mode={executionMode}, background={this.ClickerUseBackgroundClick}, activateWindow={this.ClickerActivateWindowBeforeCapture}, includeChrome={this.ClickerIncludeWindowChrome}.");
-
-                if (this.Clicker.TryExecutePointerAction(window, parsedPoint, parsedAction, out screenPoint, this.ClickerActivateWindowBeforeCapture, this.ClickerIncludeWindowChrome, this.ClickerUseBackgroundClick))
+                if (!await this.ExecuteClickerPlanStepsAsync(window, planSteps, cancellationToken))
                 {
-                    string actionText = this.ClickerLastParsedAction.ToLowerInvariant();
-                    this.AppendClickerHistory($"Executed {actionText} on {this.ClickerLastParsedPoint} at {screenPoint.X},{screenPoint.Y}. Reason: {TrimForHistory(this.ClickerLastReason)}");
-                    this.LastActionMessage = $"Clicker executed {actionText} at {screenPoint.X}, {screenPoint.Y}.";
-                    await StaticLogger.LogAsync($"[Clicker] Pointer action succeeded: action={actionText}, screenPoint={screenPoint.X},{screenPoint.Y}. Held={this.Clicker.IsLeftButtonHeld}.");
+                    await StaticLogger.LogAsync("[Clicker] Plan execution returned failure.");
+                    return;
                 }
-                else
+
+                this.clickerLastErrorFeedback = string.Empty;
+                this.clickerConsecutiveFailures = 0;
+                bool wasAwaitingWebChatResponse = this.UseWebChatProvider && this.webChatClipboardStage == WebChatClipboardStage.AwaitingResult;
+                if (this.UseWebChatProvider)
                 {
-                    string actionText = this.ClickerLastParsedAction.ToLowerInvariant();
-                    this.AppendClickerHistory($"{actionText} failed for target {this.ClickerLastParsedPoint}. Reason: {TrimForHistory(this.ClickerLastReason)}");
-                    this.LastActionMessage = $"Clicker could not perform the {actionText}.";
-                    await StaticLogger.LogAsync($"[Clicker] Pointer action failed: action={actionText}, screenPoint={screenPoint.X},{screenPoint.Y}, background={this.ClickerUseBackgroundClick}, held={this.Clicker.IsLeftButtonHeld}.");
+                    this.AdvanceWebChatClickerLoopStateAfterSuccess();
+                    if (wasAwaitingWebChatResponse)
+                    {
+                        _ = await this.TryImportWebChatResponseFromClipboardAsync(manualRequest: false);
+                    }
                 }
+
+                this.AppendClickerHistory($"Executed plan: {this.ClickerLastParsedAction}. Reason: {TrimForHistory(this.ClickerLastReason)}");
+                this.LastActionMessage = $"Clicker executed plan: {this.ClickerLastParsedAction}.";
+                await StaticLogger.LogAsync("[Clicker] Plan execution completed successfully.");
             }
             catch (OperationCanceledException)
             {
@@ -553,17 +862,54 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
             catch (Exception ex)
             {
+                this.clickerLastErrorFeedback = ExtractClickerExceptionText(ex);
+                this.ClickerLastResponse = ExtractClickerExceptionText(ex);
+                if (string.IsNullOrWhiteSpace(this.ClickerLastReason))
+                {
+                    this.ClickerLastReason = this.ClickerLastResponse;
+                }
+                try
+                {
+                    _ = await this.Client.ClearServerContextAsync();
+                }
+                catch
+                {
+                }
                 await StaticLogger.LogAsync(ex, "[Clicker] Iteration failed");
                 this.LastActionMessage = $"Clicker failed: {ex.Message}";
             }
             finally
             {
+                try
+                {
+                    this.LastGenerationStats = this.Client.GetLastGenerationStatsSnapshot();
+                    await this.UpdateHardwareStatsAsync();
+                }
+                catch
+                {
+                }
+
                 this.IsClickerBusy = false;
                 this.RequestUiRefresh();
 
-                if (shouldRestorePromptFocus && this.ClickerUseBackgroundClick)
+                if (this.ClickerUseBackgroundClick)
                 {
-                    await this.RestorePromptInputFocusAsync();
+                    if (savedForegroundWindow != IntPtr.Zero)
+                    {
+                        try
+                        {
+                            this.Clicker.TryRestoreForegroundWindow(savedForegroundWindow);
+                            await Task.Delay(30);
+                        }
+                        catch
+                        {
+                        }
+                    }
+
+                    if (shouldRestorePromptFocus)
+                    {
+                        await this.RestorePromptInputFocusAsync();
+                    }
                 }
             }
         }
@@ -617,52 +963,1168 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             return Task.CompletedTask;
         }
 
+        private async Task<string> GenerateClickerResponseAsync(LlamaGenerationRequest request, string fallbackPrompt, CancellationToken cancellationToken)
+        {
+            try
+            {
+                return await this.CollectClickerResponseAsync(request, cancellationToken);
+            }
+            catch (HttpRequestException ex) when (IsClickerInputParseFailure(ex))
+            {
+                string serverError = ExtractClickerServerError(ex);
+                this.clickerLastErrorFeedback = serverError;
+                await StaticLogger.LogAsync($"[Clicker] Primary request failed with parse-input error. Retrying with fallback prompt. Error={serverError}");
+
+                var fallbackRequest = new LlamaGenerationRequest
+                {
+                    Prompt = fallbackPrompt,
+                    SystemPrompt = null,
+                    Images = request.Images,
+                    Isolated = true,
+                    PersistConversation = false,
+                    IncludeConversationHistory = false,
+                    MaxTokens = request.MaxTokens,
+                    Temperature = request.Temperature,
+                    TopP = request.TopP,
+                    TopK = request.TopK,
+                    MaxWidthAndHeight = Math.Max(256, request.MaxWidthAndHeight > 0 ? Math.Min(request.MaxWidthAndHeight, 384) : 384),
+                    ImageFormat = "jpg",
+                    Stream = false
+                };
+
+                await StaticLogger.LogAsync($"[Clicker] Fallback prompt size: user={fallbackPrompt.Length}.");
+                try
+                {
+                    return await this.CollectClickerResponseAsync(fallbackRequest, cancellationToken);
+                }
+                catch (HttpRequestException fallbackEx) when (IsClickerInputParseFailure(fallbackEx))
+                {
+                    this.clickerLastErrorFeedback = ExtractClickerServerError(fallbackEx);
+                    await StaticLogger.LogAsync("[Clicker] Fallback request still failed with parse-input error. Retrying with ultra-compact image payload.");
+
+                    var ultraFallbackRequest = new LlamaGenerationRequest
+                    {
+                        Prompt = fallbackPrompt,
+                        SystemPrompt = null,
+                        Images = request.Images,
+                        Isolated = true,
+                        PersistConversation = false,
+                        IncludeConversationHistory = false,
+                        MaxTokens = Math.Min(256, request.MaxTokens),
+                        Temperature = request.Temperature,
+                        TopP = request.TopP,
+                        TopK = request.TopK,
+                        MaxWidthAndHeight = 256,
+                        ImageFormat = "jpg",
+                        Stream = false
+                    };
+
+                    return await this.CollectClickerResponseAsync(ultraFallbackRequest, cancellationToken);
+                }
+            }
+        }
+
+        private async Task<string> CollectClickerResponseAsync(LlamaGenerationRequest request, CancellationToken cancellationToken)
+        {
+            var sb = new StringBuilder();
+            await foreach (string chunk in this.Client.GenerateAsync(request, cancellationToken))
+            {
+                sb.Append(chunk);
+            }
+
+            return sb.ToString().Trim();
+        }
+
+        private static bool IsClickerInputParseFailure(HttpRequestException ex)
+        {
+            return ex.Message.Contains("Failed to parse input", StringComparison.OrdinalIgnoreCase)
+                || (ex.Message.Contains("500", StringComparison.OrdinalIgnoreCase)
+                    && ex.Message.Contains("server_error", StringComparison.OrdinalIgnoreCase)
+                    && ex.Message.Contains("parse", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static string ExtractClickerServerError(HttpRequestException ex)
+        {
+            string message = ex.Message?.Trim() ?? string.Empty;
+            if (message.Length <= 1200)
+            {
+                return message;
+            }
+
+            return message[..1197] + "...";
+        }
+
+        private static string ExtractClickerExceptionText(Exception ex)
+        {
+            string message = ex.ToString().Trim();
+            if (message.Length <= 2000)
+            {
+                return message;
+            }
+
+            return message[..1997] + "...";
+        }
+
+        private int GetClickerModelMaxWidthAndHeight(string screenshotPath)
+        {
+            try
+            {
+                using var bitmap = new Bitmap(screenshotPath);
+                int longestEdge = Math.Max(bitmap.Width, bitmap.Height);
+                if (longestEdge <= 0)
+                {
+                    return 384;
+                }
+
+                double scale = Math.Clamp(this.ClickerModelImageScalePercent, 5, 100) / 100.0;
+                int scaled = Math.Max(128, (int)Math.Round(longestEdge * scale));
+                return Math.Clamp(scaled, 128, 384);
+            }
+            catch
+            {
+                return 384;
+            }
+        }
+
         private string BuildClickerPrompt(ScreenClicker.MarkedWindowInfo window, string? liveOperatorNote)
         {
-            string historyText = string.Join("\n", this.clickerHistory
+            string historyText = string.Join(" | ", this.clickerHistory
                 .Where(s => !string.IsNullOrWhiteSpace(s))
-                .TakeLast(ClickerHistoryMaxEntries)
-                .Select(s => $"- {s}"));
+                .TakeLast(5)
+                .Select(s => $"- {LimitClickerPromptText(SanitizeClickerPromptText(s), 280)}"));
 
             string protectedZonePrompt = string.Empty;
             List<ClickerProtectedZone> promptZones = this.VisibleClickerProtectedZones.ToList();
             if (this.ClickerTellModelAboutProtectedZones && promptZones.Count > 0)
             {
-                string warning = this.GetClickerProtectedZoneModelWarning();
-                string zoneLines = string.Join("\n", promptZones.Select(z => $"- {z.Name}: [{z.LeftNormalized}, {z.TopNormalized}, {z.RightNormalized}, {z.BottomNormalized}] in 0..1000 coordinates"));
-                protectedZonePrompt = $"Protected zones:\n{warning}\n{zoneLines}\n\n";
+                string zoneLines = string.Join("; ", promptZones.Select(z => $"{z.Name}=[{z.LeftNormalized},{z.TopNormalized},{z.RightNormalized},{z.BottomNormalized}]"));
+                protectedZonePrompt = $"Protected zones: {zoneLines}.\n";
             }
 
-            return "Analyze the attached screenshot of the marked application window.\n\n"
-                + $"User goal / procedure:\n{this.ClickerInstructions.Trim()}\n\n"
+            return "Analyze the screenshot and return one JSON object only.\n"
+                + $"Task: {LimitClickerPromptText(SanitizeClickerPromptText(this.ClickerInstructions.Trim()), 420)}\n"
                 + (string.IsNullOrWhiteSpace(liveOperatorNote)
                     ? string.Empty
-                    : $"Operator live note / current chat input:\n{liveOperatorNote.Trim()}\n\n")
-                + $"Current pointer state:\n- Left mouse button currently held: {(this.Clicker.IsLeftButtonHeld ? "yes" : "no")}\n\n"
+                    : $"Note: {LimitClickerPromptText(SanitizeClickerPromptText(liveOperatorNote.Trim()), 220)}\n")
+                + (this.ClickerSendLastErrorToModel && !string.IsNullOrWhiteSpace(this.clickerLastErrorFeedback)
+                    ? $"Last error: {LimitClickerPromptText(SanitizeClickerPromptText(this.clickerLastErrorFeedback), 260)}\n"
+                    : string.Empty)
+                + $"Pointer held: {(this.Clicker.IsLeftButtonHeld ? "yes" : "no")}\n"
                 + (string.IsNullOrWhiteSpace(historyText)
                     ? string.Empty
-                    : $"Recent clicker context:\n{historyText}\n\n")
+                    : $"Recent: {historyText}\n")
                 + protectedZonePrompt
-                + "Window info:\n"
-                + $"- Title: {window.Title}\n"
-                + $"- Bounds: {window.Left},{window.Top} {window.Width}x{window.Height}\n\n"
-                + $"Screenshot scope: {(this.ClickerIncludeWindowChrome ? "full window including frame/title bar" : "client content only; ignore frame/title bar")}\n\n"
-                + "Rules:\n"
-                + "- Return JSON only.\n"
-                + "- Preferred format: {\"point_2d\":[x,y],\"action\":\"click\",\"reason\":\"detailed grounded reason\"}.\n"
-                + "- Use coordinates relative to the attached screenshot.\n"
-                + "- Prefer x and y values in the 0..1000 range.\n"
-                + "- Supported action values are click, doubleclick, down, and up.\n"
-                + "- If action is omitted, empty, or null, it means click.\n"
-                + "- Use down to press and hold, then return a later target with down again to keep dragging or with up to release at a new location.\n"
-                + "- Use doubleclick when the UI requires a true double-click gesture.\n"
-                + "- The reason should mention visible evidence, the intended UI element, and how the choice relates to the recent clicker history.\n"
-                + "- Avoid repeating targets that already failed unless the screenshot clearly changed and the reason explains why retrying is now appropriate.\n"
-                + (this.ClickerTellModelAboutProtectedZones && promptZones.Count > 0
-                    ? "- Never choose a point that lies inside a protected zone.\n"
+                + $"Window: {SanitizeClickerPromptText(window.Title)} [{window.Left},{window.Top} {window.Width}x{window.Height}]\n"
+                + $"Scope: {(this.ClickerIncludeWindowChrome ? "full-window" : "client-only")}\n"
+                + (this.ClickerLimitInteractionRegion
+                    ? $"Interactive region only: {this.ClickerInteractionMinX},{this.ClickerInteractionMinY} to {this.ClickerInteractionMaxX},{this.ClickerInteractionMaxY}.\n"
                     : string.Empty)
-                + "- If no safe pointer action exists, return {\"point_2d\":[-1,-1],\"action\":null,\"reason\":\"not found\"}.\n";
+                + "Format: {\"steps\":[step],\"reason\":\"short reason\"}.\n"
+                + "Pointer step: {\"point_2d\":[x,y],\"action\":\"click|doubleclick|down|up\"}.\n"
+                + "Keyboard step: {\"keys\":[\"ctrl\",\"s\"],\"action\":\"press|down|up\"} or {\"type_text\":\"text\"}.\n"
+                + (this.ClickerAllowModelQuestions
+                    ? "If user input is required, you may ask one question using JSON like {\"question\":\"Which option?\",\"options\":[\"A\",\"B\",\"C\"],\"addTextOption\":true,\"textLabel\":\"Custom answer\",\"textPlaceholder\":\"Type here\",\"submitText\":\"Send\",\"kind\":\"info\",\"reason\":\"why you need the choice\"}. addTextOption allows a raw text answer in addition to buttons.\n"
+                    : string.Empty)
+                + "Use screenshot-relative coordinates, preferably 0..1000.\n"
+                + (this.ClickerTellModelAboutProtectedZones && promptZones.Count > 0
+                    ? "Never choose a point inside a protected zone.\n"
+                    : string.Empty)
+                + "If no safe action exists, return {\"point_2d\":[-1,-1],\"action\":null,\"reason\":\"not found\"}.\n";
         }
+
+        private async Task PrepareWebChatClickerLoopStateAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            this.ResetWebChatClickerLoopStateIfNeeded();
+            switch (this.webChatClipboardStage)
+            {
+                case WebChatClipboardStage.Image:
+                    if (!string.IsNullOrWhiteSpace(this.webChatPreparedImageKey)
+                        && await CopyImageSourceToClipboardAsync(this.webChatPreparedImageKey))
+                    {
+                        this.WebChatConnectionStatus = $"{this.SelectedWebChatProviderText} automation ready. Clipboard contains the queued image attachment for upload/paste.";
+                    }
+                    break;
+
+                case WebChatClipboardStage.Text:
+                    if (!string.IsNullOrWhiteSpace(this.webChatPreparedPromptText))
+                    {
+                        await SetClipboardTextAsync(this.webChatPreparedPromptText);
+                        this.WebChatConnectionStatus = $"{this.SelectedWebChatProviderText} automation ready. Clipboard contains the queued prompt text.";
+                    }
+                    break;
+            }
+        }
+
+        private void ResetWebChatClickerLoopStateIfNeeded()
+        {
+            string prompt = this.UserInput?.Trim() ?? string.Empty;
+            string imageKey = this.SelectedImagePaths.FirstOrDefault() ?? string.Empty;
+
+            if (this.webChatClipboardStage != WebChatClipboardStage.None
+                && string.IsNullOrWhiteSpace(prompt)
+                && string.IsNullOrWhiteSpace(imageKey))
+            {
+                return;
+            }
+
+            bool promptChanged = !string.Equals(this.webChatPreparedPromptText, prompt, StringComparison.Ordinal);
+            bool imageChanged = !string.Equals(this.webChatPreparedImageKey, imageKey, StringComparison.Ordinal);
+            if (!promptChanged && !imageChanged && this.webChatClipboardStage != WebChatClipboardStage.None)
+            {
+                return;
+            }
+
+            this.webChatPreparedPromptText = prompt;
+            this.webChatPreparedImageKey = imageKey;
+            this.webChatClipboardStage = !string.IsNullOrWhiteSpace(imageKey)
+                ? WebChatClipboardStage.Image
+                : !string.IsNullOrWhiteSpace(prompt)
+                    ? WebChatClipboardStage.Text
+                    : WebChatClipboardStage.None;
+        }
+
+        private string BuildWebChatClickerAutomationNote()
+        {
+            string providerHint = this.SelectedWebChatProvider switch
+            {
+                "qwen" => "Qwen usually places the composer across the bottom center, often with a leading plus button for attachments and a send or voice control on the right.",
+                "gemini" => "Gemini usually uses a bottom composer with upload controls near the prompt box and a send action at the right side of the composer.",
+                "chatgpt" => "ChatGPT usually uses a bottom composer with attachment controls to the left and a send button to the right.",
+                _ => this.SelectedWebChatProviderHints
+            };
+
+            string stageInstruction = this.webChatClipboardStage switch
+            {
+                WebChatClipboardStage.Image => "The clipboard currently contains the queued image attachment. Focus the chat composer or attachment flow and paste or upload the image before sending any text.",
+                WebChatClipboardStage.Text => "The clipboard currently contains the queued prompt text. Focus the input composer, paste with Ctrl+V, then send the message with Enter or the send button.",
+                WebChatClipboardStage.AwaitingResult => "The queued prompt was already sent. Do not resend it. If a complete assistant reply is visible, focus the latest reply, select or copy its text into the clipboard, and stop after the clipboard contains the reply. If the provider is still generating, wait and avoid unnecessary actions.",
+                _ => "No clipboard payload is currently queued. Avoid unnecessary actions and wait for new work."
+            };
+
+            return $"Browser provider: {this.SelectedWebChatProviderText}. {providerHint} {stageInstruction} Prefer a complete multi-step plan that finishes the current queued clipboard stage safely. If the queued stage already appears completed on screen, return the sentinel no-action result.";
+        }
+
+        private void AdvanceWebChatClickerLoopStateAfterSuccess()
+        {
+            switch (this.webChatClipboardStage)
+            {
+                case WebChatClipboardStage.Image:
+                    this.webChatClipboardStage = !string.IsNullOrWhiteSpace(this.webChatPreparedPromptText)
+                        ? WebChatClipboardStage.Text
+                        : WebChatClipboardStage.AwaitingResult;
+                    this.WebChatConnectionStatus = !string.IsNullOrWhiteSpace(this.webChatPreparedPromptText)
+                        ? $"{this.SelectedWebChatProviderText} automation advanced from image stage to prompt stage."
+                        : $"{this.SelectedWebChatProviderText} image stage executed. Waiting for the page state to settle.";
+                    break;
+
+                case WebChatClipboardStage.Text:
+                    this.webChatClipboardStage = WebChatClipboardStage.AwaitingResult;
+                    this.WebChatConnectionStatus = $"{this.SelectedWebChatProviderText} prompt/send stage executed. Waiting for response.";
+                    if (string.Equals(this.UserInput?.Trim(), this.webChatPreparedPromptText, StringComparison.Ordinal))
+                    {
+                        this.UserInput = string.Empty;
+                    }
+                    break;
+
+                case WebChatClipboardStage.AwaitingResult:
+                    this.WebChatConnectionStatus = $"{this.SelectedWebChatProviderText} response capture step executed. Trying to import clipboard text.";
+                    break;
+            }
+        }
+
+        private void QueueWebChatClipboardWork(string promptText, string imageKey)
+        {
+            this.webChatPreparedPromptText = promptText?.Trim() ?? string.Empty;
+            this.webChatPreparedImageKey = imageKey?.Trim() ?? string.Empty;
+            this.webChatClipboardStage = !string.IsNullOrWhiteSpace(this.webChatPreparedImageKey)
+                ? WebChatClipboardStage.Image
+                : !string.IsNullOrWhiteSpace(this.webChatPreparedPromptText)
+                    ? WebChatClipboardStage.Text
+                    : WebChatClipboardStage.None;
+            this.webChatLastImportedResponse = string.Empty;
+        }
+
+        private void QueuePendingWebChatAssistantMessage(string statusText)
+        {
+            string normalizedStatus = string.IsNullOrWhiteSpace(statusText)
+                ? $"Prompt prepared for {this.SelectedWebChatProviderText}."
+                : statusText.Trim();
+            string waitingText = $"[Web chat] {normalizedStatus}\n\nWaiting for the provider response. Use Clicker automation or import the response text from the clipboard.";
+
+            if (this.webChatPendingAssistantMessage != null && this.ChatMessages.Contains(this.webChatPendingAssistantMessage))
+            {
+                this.webChatPendingAssistantMessage.Content = waitingText;
+                this.webChatPendingAssistantMessage.CreatedAtUtc = DateTime.UtcNow;
+                return;
+            }
+
+            this.webChatPendingAssistantMessage = new LlamaChatMessage
+            {
+                Role = "assistant",
+                Content = waitingText,
+                CreatedAtUtc = DateTime.UtcNow
+            };
+            this.ChatMessages.Add(this.webChatPendingAssistantMessage);
+        }
+
+        [SupportedOSPlatform("windows")]
+        public async Task ImportWebChatResponseFromClipboardAsync()
+        {
+            bool imported = await this.TryImportWebChatResponseFromClipboardAsync(manualRequest: true);
+            if (imported)
+            {
+                await this.ScrollChatToBottomAsync();
+            }
+        }
+
+        [SupportedOSPlatform("windows")]
+        private async Task<bool> TryImportWebChatResponseFromClipboardAsync(bool manualRequest)
+        {
+            if (!this.UseWebChatProvider)
+            {
+                return false;
+            }
+
+            string clipboardText;
+            try
+            {
+                clipboardText = await GetClipboardTextAsync();
+            }
+            catch (Exception ex)
+            {
+                if (manualRequest)
+                {
+                    this.LastActionMessage = $"Clipboard read failed: {ex.Message}";
+                    this.RequestUiRefresh();
+                }
+
+                return false;
+            }
+
+            string normalized = clipboardText?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                if (manualRequest)
+                {
+                    this.LastActionMessage = "Clipboard does not contain text to import.";
+                    this.RequestUiRefresh();
+                }
+
+                return false;
+            }
+
+            if (string.Equals(normalized, this.webChatPreparedPromptText, StringComparison.Ordinal)
+                || string.Equals(normalized, this.webChatLastImportedResponse, StringComparison.Ordinal))
+            {
+                if (manualRequest)
+                {
+                    this.LastActionMessage = "Clipboard text is not a new provider response yet.";
+                    this.RequestUiRefresh();
+                }
+
+                return false;
+            }
+
+            if (this.webChatPendingAssistantMessage != null && this.ChatMessages.Contains(this.webChatPendingAssistantMessage))
+            {
+                this.webChatPendingAssistantMessage.Content = normalized;
+                this.webChatPendingAssistantMessage.CreatedAtUtc = DateTime.UtcNow;
+            }
+            else
+            {
+                this.ChatMessages.Add(new LlamaChatMessage
+                {
+                    Role = "assistant",
+                    Content = normalized,
+                    CreatedAtUtc = DateTime.UtcNow
+                });
+            }
+
+            if (!this.IsolatedGeneration)
+            {
+                this.Client.AddAssistantMessage(normalized);
+            }
+
+            this.webChatLastImportedResponse = normalized;
+            this.webChatPendingAssistantMessage = null;
+            this.webChatPreparedPromptText = string.Empty;
+            this.webChatPreparedImageKey = string.Empty;
+            this.webChatClipboardStage = WebChatClipboardStage.None;
+            this.WebChatConnectionStatus = $"Imported response from {this.SelectedWebChatProviderText}.";
+            this.LastActionMessage = $"Web chat response imported from clipboard.";
+            this.RequestUiRefresh();
+            return true;
+        }
+
+        [SupportedOSPlatform("windows")]
+        private static Task<string> GetClipboardTextAsync()
+        {
+            return RunOnStaThreadAsync(() => System.Windows.Forms.Clipboard.ContainsText()
+                ? System.Windows.Forms.Clipboard.GetText()
+                : string.Empty);
+        }
+
+        public string BuildClickerPromptPreview()
+        {
+            return "Analyze the screenshot and return one JSON object only.\n"
+                + $"Task: {LimitClickerPromptText(SanitizeClickerPromptText(this.ClickerInstructions.Trim()), 420)}\n"
+                + (this.ClickerSendLastErrorToModel && !string.IsNullOrWhiteSpace(this.clickerLastErrorFeedback)
+                    ? $"Last error: {LimitClickerPromptText(SanitizeClickerPromptText(this.clickerLastErrorFeedback), 260)}\n"
+                    : string.Empty)
+                + $"Pointer held: {(this.Clicker.IsLeftButtonHeld ? "yes" : "no")}\n"
+                + $"Format: {{\"steps\":[step],\"reason\":\"short reason\"}}.\n"
+                + "Use screenshot-relative coordinates, preferably 0..1000.\n"
+                + "If no safe action exists, return {\"point_2d\":[-1,-1],\"action\":null,\"reason\":\"not found\"}.";
+        }
+
+        private string BuildFallbackClickerPrompt(ScreenClicker.MarkedWindowInfo window, string? liveOperatorNote)
+        {
+            return "Return one JSON object only for the screenshot. "
+                + $"Task: {LimitClickerPromptText(SanitizeClickerPromptText(this.ClickerInstructions.Trim()), 220)}. "
+                + (string.IsNullOrWhiteSpace(liveOperatorNote)
+                    ? string.Empty
+                    : $"Note: {LimitClickerPromptText(SanitizeClickerPromptText(liveOperatorNote.Trim()), 120)}. ")
+                + (this.ClickerSendLastErrorToModel && !string.IsNullOrWhiteSpace(this.clickerLastErrorFeedback)
+                    ? $"Last error: {LimitClickerPromptText(SanitizeClickerPromptText(this.clickerLastErrorFeedback), 160)}. "
+                    : string.Empty)
+                + (this.ClickerLimitInteractionRegion
+                    ? $"Interactive region: {this.ClickerInteractionMinX},{this.ClickerInteractionMinY} to {this.ClickerInteractionMaxX},{this.ClickerInteractionMaxY}. "
+                    : string.Empty)
+                + $"Mouse held: {(this.Clicker.IsLeftButtonHeld ? "yes" : "no")}. "
+                + "Use {\"steps\":[{\"point_2d\":[x,y],\"action\":\"click\"}],\"reason\":\"...\"}. "
+                + "Keyboard allowed with keys/action or type_text. "
+                + (this.ClickerAllowModelQuestions
+                    ? "You may ask one user question with JSON question plus options if a decision is required; addTextOption=true may request an extra raw text answer field. "
+                    : string.Empty)
+                + "If nothing is safe return {\"point_2d\":[-1,-1],\"action\":null,\"reason\":\"not found\"}.";
+        }
+
+        private static string BuildCompactClickerSystemPrompt()
+        {
+            return "You plan UI actions from an image. Return JSON only. Keep output short, safe, and actionable. Use steps plus reason. Pointer actions: click, doubleclick, down, up. Keyboard actions: press, down, up, or type_text.";
+        }
+
+        private static string SanitizeClickerPromptText(string? text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return string.Empty;
+            }
+
+            var sb = new StringBuilder(text.Length);
+            for (int i = 0; i < text.Length; i++)
+            {
+                char c = text[i];
+
+                if (char.IsControl(c) && c != '\n' && c != '\r' && c != '\t')
+                {
+                    continue;
+                }
+
+                c = c switch
+                {
+                    '\u2013' or '\u2014' or '\u2212' => '-',
+                    '\u2018' or '\u2019' => '\'',
+                    '\u201C' or '\u201D' => '"',
+                    '\u2026' => '.',
+                    '\u00A0' => ' ',
+                    '\u00E4' => 'a',
+                    '\u00F6' => 'o',
+                    '\u00FC' => 'u',
+                    '\u00C4' => 'A',
+                    '\u00D6' => 'O',
+                    '\u00DC' => 'U',
+                    '\u00DF' => 's',
+                    _ => c
+                };
+
+                if (char.IsHighSurrogate(c))
+                {
+                    if (i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
+                    {
+                        sb.Append(c);
+                        sb.Append(text[++i]);
+                    }
+
+                    continue;
+                }
+
+                if (char.IsLowSurrogate(c))
+                {
+                    continue;
+                }
+
+                if (c <= 127)
+                {
+                    sb.Append(c);
+                }
+            }
+
+            return sb.ToString();
+        }
+
+        private static string LimitClickerPromptText(string text, int maxLength)
+        {
+            if (string.IsNullOrEmpty(text) || text.Length <= maxLength)
+            {
+                return text;
+            }
+
+            return text[..Math.Max(0, maxLength - 3)] + "...";
+        }
+
+
+        private async Task<bool> ExecuteClickerPlanStepsAsync(ScreenClicker.MarkedWindowInfo window, IReadOnlyList<ClickerPlanStep> planSteps, CancellationToken cancellationToken)
+        {
+            int maxSteps = Math.Min(8, planSteps.Count);
+            await StaticLogger.LogAsync($"[Clicker] Starting plan execution. Steps={planSteps.Count}, Executing={maxSteps}.");
+            for (int index = 0; index < maxSteps; index++)
+            {
+                ClickerPlanStep step = planSteps[index];
+                await StaticLogger.LogAsync($"[Clicker] Executing step {index + 1}/{maxSteps}: {DescribeClickerPlanStep(step)}");
+
+                if (step.DelayMs > 0)
+                {
+                    await StaticLogger.LogAsync($"[Clicker] Step {index + 1}: delaying {step.DelayMs}ms before action.");
+                    await Task.Delay(step.DelayMs, cancellationToken);
+                }
+
+                if (step.IsPointer && step.Pointer != null)
+                {
+                    if (step.Pointer.X < 0 || step.Pointer.Y < 0)
+                    {
+                        await StaticLogger.LogAsync($"[Clicker] Step {index + 1}: pointer sentinel detected ({step.Pointer.X},{step.Pointer.Y}), skipping.");
+                        continue;
+                    }
+
+                    Point screenPoint = this.ConvertClickerModelPointToScreen(window, step.Pointer);
+                    this.ClickerLastTargetScreenPoint = $"{screenPoint.X}, {screenPoint.Y}";
+                    await StaticLogger.LogAsync($"[Clicker] Step {index + 1}: pointer mapped to screen point {screenPoint.X},{screenPoint.Y}. Action={step.PointerAction}.");
+
+                    Rectangle effectiveBounds = this.GetClickerEffectiveReferenceBounds(window, this.ClickerIncludeWindowChrome);
+                    if (this.ClickerRequirePointInsideWindow && !Rectangle.Inflate(effectiveBounds, -2, -2).Contains(screenPoint))
+                    {
+                        this.AppendClickerHistory($"Rejected out-of-bounds target {step.Pointer.DisplayLabel}. Reason: {TrimForHistory(this.ClickerLastReason)}");
+                        this.LastActionMessage = "Clicker rejected a target because it lies outside the marked window.";
+                        await StaticLogger.LogAsync($"[Clicker] Step {index + 1}: rejected, target outside window bounds.");
+                        return false;
+                    }
+
+                    if (this.TryFindBlockingProtectedZone(window, screenPoint, this.ClickerIncludeWindowChrome, out ClickerProtectedZone? protectedZone) && protectedZone != null)
+                    {
+                        this.ClickerLastConfirmationOutcome = "Protected zone";
+                        this.AppendClickerHistory($"Blocked pointer step because it falls inside protected zone '{protectedZone.Name}'.");
+                        this.LastActionMessage = $"Clicker blocked a pointer step because it falls inside protected zone '{protectedZone.Name}'.";
+                        await StaticLogger.LogAsync($"[Clicker] Step {index + 1}: blocked by protected zone '{protectedZone.Name}'.");
+                        return false;
+                    }
+
+                    var screenPointCommand = new ScreenClicker.ClickPoint(screenPoint.X, screenPoint.Y, ScreenClicker.CoordinateSpace.ScreenPixels, step.Pointer.Source + "-screen");
+                    bool pointerSuccess = false;
+                    Point executedPoint = Point.Empty;
+                    for (int attempt = 0; attempt < 3; attempt++)
+                    {
+                        if (attempt > 0)
+                        {
+                            await StaticLogger.LogAsync($"[Clicker] Step {index + 1}: retrying pointer action (attempt {attempt + 1}/3).");
+                            this.Clicker.TryRefreshWindow(window, out var retryWindow);
+                            if (retryWindow != null)
+                            {
+                                window = retryWindow;
+                            }
+
+                            await Task.Delay(150 * attempt, cancellationToken);
+                        }
+
+                        if (this.Clicker.TryExecutePointerAction(window, screenPointCommand, step.PointerAction, out executedPoint, this.ClickerActivateWindowBeforeCapture, this.ClickerIncludeWindowChrome, this.ClickerUseBackgroundClick))
+                        {
+                            pointerSuccess = true;
+                            break;
+                        }
+                    }
+
+                    if (!pointerSuccess)
+                    {
+                        if (this.ClickerUseBackgroundClick)
+                        {
+                            await StaticLogger.LogAsync($"[Clicker] Step {index + 1}: background click failed after retries. Trying one foreground fallback click.");
+                            this.Clicker.TryRefreshWindow(window, out var foregroundRetryWindow);
+                            if (foregroundRetryWindow != null)
+                            {
+                                window = foregroundRetryWindow;
+                            }
+
+                            if (this.Clicker.TryExecutePointerAction(window, screenPointCommand, step.PointerAction, out executedPoint, this.ClickerActivateWindowBeforeCapture, this.ClickerIncludeWindowChrome, useBackgroundClick: false))
+                            {
+                                pointerSuccess = true;
+                                await StaticLogger.LogAsync($"[Clicker] Step {index + 1}: foreground fallback click succeeded at {executedPoint.X},{executedPoint.Y}. Action={step.PointerAction}.");
+                            }
+                        }
+
+                        if (pointerSuccess)
+                        {
+                            this.ClickerLastParsedPoint = step.Pointer.DisplayLabel;
+                            this.ClickerLastTargetScreenPoint = $"{executedPoint.X}, {executedPoint.Y}";
+                            continue;
+                        }
+
+                        this.LastActionMessage = "Clicker could not execute a pointer step.";
+                        this.AppendClickerHistory($"Pointer step failed at {screenPoint.X},{screenPoint.Y}.");
+                        await StaticLogger.LogAsync($"[Clicker] Step {index + 1}: pointer execution failed at {screenPoint.X},{screenPoint.Y} after retries. Action={step.PointerAction}.");
+                        return false;
+                    }
+
+                    this.ClickerLastParsedPoint = step.Pointer.DisplayLabel;
+                    this.ClickerLastTargetScreenPoint = $"{executedPoint.X}, {executedPoint.Y}";
+                    await StaticLogger.LogAsync($"[Clicker] Step {index + 1}: pointer execution succeeded at {executedPoint.X},{executedPoint.Y}. Action={step.PointerAction}.");
+                    continue;
+                }
+
+                if (step.IsKeyboard)
+                {
+                    var keyboardCommand = new ScreenClicker.ParsedKeyboardCommand(step.Keys ?? [], step.KeyboardAction, step.TypeText);
+                    await StaticLogger.LogAsync($"[Clicker] Step {index + 1}: executing keyboard action {step.KeyboardAction}. Keys='{string.Join("+", step.Keys ?? [])}', TextLength={(step.TypeText?.Length ?? 0)}.");
+                    bool keyboardSuccess = false;
+                    for (int attempt = 0; attempt < 3; attempt++)
+                    {
+                        if (attempt > 0)
+                        {
+                            await StaticLogger.LogAsync($"[Clicker] Step {index + 1}: retrying keyboard action (attempt {attempt + 1}/3).");
+                            this.Clicker.TryRefreshWindow(window, out var retryWindow);
+                            if (retryWindow != null)
+                            {
+                                window = retryWindow;
+                            }
+
+                            await Task.Delay(150 * attempt, cancellationToken);
+                        }
+
+                        if (this.Clicker.TryExecuteKeyboardCommand(window, keyboardCommand, this.ClickerActivateWindowBeforeCapture, this.ClickerUseBackgroundClick))
+                        {
+                            keyboardSuccess = true;
+                            break;
+                        }
+                    }
+
+                    if (!keyboardSuccess)
+                    {
+                        this.LastActionMessage = "Clicker could not execute a keyboard step.";
+                        this.AppendClickerHistory($"Keyboard step failed ({step.Describe()}).");
+                        await StaticLogger.LogAsync($"[Clicker] Step {index + 1}: keyboard execution failed after retries.");
+                        return false;
+                    }
+
+                    this.ClickerLastParsedPoint = string.Empty;
+                    await StaticLogger.LogAsync($"[Clicker] Step {index + 1}: keyboard execution succeeded.");
+                    continue;
+                }
+
+                await StaticLogger.LogAsync($"[Clicker] Step {index + 1}: no executable action detected, skipping.");
+            }
+
+            await StaticLogger.LogAsync("[Clicker] All executable plan steps finished.");
+            return true;
+        }
+
+        private bool TryParseClickerPlan(string responseText, ScreenClicker.MarkedWindowInfo window, bool includeWindowChrome, out List<ClickerPlanStep>? steps, out string normalizedJson, out string errorMessage)
+        {
+            steps = [];
+            normalizedJson = string.Empty;
+            errorMessage = string.Empty;
+
+            foreach (string candidate in EnumerateJsonCandidates(responseText))
+            {
+                try
+                {
+                    using var document = JsonDocument.Parse(candidate, new JsonDocumentOptions { AllowTrailingCommas = true });
+                    normalizedJson = JsonSerializer.Serialize(document.RootElement, new JsonSerializerOptions { WriteIndented = true });
+                    if (TryExtractClickerPlanSteps(document.RootElement, window, includeWindowChrome, out List<ClickerPlanStep>? extractedSteps) && extractedSteps != null && extractedSteps.Count > 0)
+                    {
+                        _ = StaticLogger.LogAsync($"[Clicker] TryParseClickerPlan: parsed {extractedSteps.Count} step(s) from JSON candidate.");
+                        steps = extractedSteps;
+                        return true;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            if (this.Clicker.TryParseClickPoint(responseText, window, includeWindowChrome, out var command, out normalizedJson, out _)
+                && command != null)
+            {
+                _ = StaticLogger.LogAsync("[Clicker] TryParseClickerPlan: fallback single pointer command parsed.");
+                steps.Add(new ClickerPlanStep(command.Point, command.Action, null, ScreenClicker.KeyboardAction.Press, null, 0));
+                return true;
+            }
+
+            _ = StaticLogger.LogAsync("[Clicker] TryParseClickerPlan: failed to parse any pointer/keyboard steps.");
+            errorMessage = "No pointer or keyboard action could be parsed from the model response.";
+            return false;
+        }
+
+        private bool TryParseClickerUserQuestion(string responseText, out ClickerUserQuestion? question)
+        {
+            question = null;
+
+            foreach (string candidate in EnumerateJsonCandidates(responseText))
+            {
+                try
+                {
+                    using var document = JsonDocument.Parse(candidate, new JsonDocumentOptions { AllowTrailingCommas = true });
+                    if (TryExtractClickerUserQuestion(document.RootElement, out question) && question != null)
+                    {
+                        question = question with
+                        {
+                            NormalizedJson = JsonSerializer.Serialize(document.RootElement, new JsonSerializerOptions { WriteIndented = true })
+                        };
+                        return true;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryExtractClickerUserQuestion(JsonElement root, out ClickerUserQuestion? question)
+        {
+            question = null;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            string? text = null;
+            foreach (string propertyName in new[] { "question", "ask_user", "askUser", "user_question", "prompt_user", "prompt" })
+            {
+                if (root.TryGetProperty(propertyName, out JsonElement property) && property.ValueKind == JsonValueKind.String)
+                {
+                    text = property.GetString();
+                    break;
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            var options = new List<string>();
+            foreach (string propertyName in new[] { "options", "choices", "answers", "buttons", "selection_options" })
+            {
+                if (!root.TryGetProperty(propertyName, out JsonElement optionsElement) || optionsElement.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (JsonElement optionElement in optionsElement.EnumerateArray())
+                {
+                    switch (optionElement.ValueKind)
+                    {
+                        case JsonValueKind.String:
+                            AddClickerQuestionOption(options, optionElement.GetString());
+                            break;
+                        case JsonValueKind.Object:
+                            foreach (string textProperty in new[] { "label", "text", "value", "option" })
+                            {
+                                if (optionElement.TryGetProperty(textProperty, out JsonElement labelElement) && labelElement.ValueKind == JsonValueKind.String)
+                                {
+                                    AddClickerQuestionOption(options, labelElement.GetString());
+                                    break;
+                                }
+                            }
+                            break;
+                    }
+                }
+            }
+
+            if (options.Count == 0)
+            {
+                return false;
+            }
+
+            string title = root.TryGetProperty("title", out JsonElement titleElement) && titleElement.ValueKind == JsonValueKind.String
+                ? titleElement.GetString() ?? string.Empty
+                : string.Empty;
+
+            bool addTextOption = false;
+            foreach (string propertyName in new[] { "addTextOption", "add_text_option", "allowTextAnswer", "allow_text_answer", "allowFreeText", "allow_free_text" })
+            {
+                if (root.TryGetProperty(propertyName, out JsonElement boolElement)
+                    && (boolElement.ValueKind == JsonValueKind.True || boolElement.ValueKind == JsonValueKind.False))
+                {
+                    addTextOption = boolElement.GetBoolean();
+                    break;
+                }
+            }
+
+            string kind = root.TryGetProperty("kind", out JsonElement kindElement) && kindElement.ValueKind == JsonValueKind.String
+                ? kindElement.GetString() ?? string.Empty
+                : string.Empty;
+            string textLabel = root.TryGetProperty("textLabel", out JsonElement textLabelElement) && textLabelElement.ValueKind == JsonValueKind.String
+                ? textLabelElement.GetString() ?? string.Empty
+                : string.Empty;
+            string textPlaceholder = root.TryGetProperty("textPlaceholder", out JsonElement textPlaceholderElement) && textPlaceholderElement.ValueKind == JsonValueKind.String
+                ? textPlaceholderElement.GetString() ?? string.Empty
+                : string.Empty;
+            string submitText = root.TryGetProperty("submitText", out JsonElement submitTextElement) && submitTextElement.ValueKind == JsonValueKind.String
+                ? submitTextElement.GetString() ?? string.Empty
+                : string.Empty;
+
+            question = new ClickerUserQuestion(title, text.Trim(), options, string.Empty, kind, addTextOption, textLabel, textPlaceholder, submitText);
+            return true;
+        }
+
+        private static void AddClickerQuestionOption(List<string> options, string? value)
+        {
+            string trimmed = value?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(trimmed) || options.Contains(trimmed, StringComparer.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            options.Add(trimmed);
+        }
+
+        private bool TryExtractClickerPlanSteps(JsonElement root, ScreenClicker.MarkedWindowInfo window, bool includeWindowChrome, out List<ClickerPlanStep>? steps)
+        {
+            steps = [];
+
+            if (root.ValueKind == JsonValueKind.Object)
+            {
+                foreach (string propertyName in new[] { "steps", "sequence", "actions", "commands" })
+                {
+                    if (root.TryGetProperty(propertyName, out JsonElement arrayElement) && arrayElement.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (JsonElement stepElement in arrayElement.EnumerateArray())
+                        {
+                            if (TryParsePlanStep(stepElement, window, includeWindowChrome, out ClickerPlanStep? parsed) && parsed != null)
+                            {
+                                steps.Add(parsed);
+                            }
+                        }
+
+                        if (steps.Count > 0)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            if (root.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement item in root.EnumerateArray())
+                {
+                    if (TryParsePlanStep(item, window, includeWindowChrome, out ClickerPlanStep? parsed) && parsed != null)
+                    {
+                        steps.Add(parsed);
+                    }
+                }
+
+                return steps.Count > 0;
+            }
+
+            if (TryParsePlanStep(root, window, includeWindowChrome, out ClickerPlanStep? single) && single != null)
+            {
+                steps.Add(single);
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool TryParsePlanStep(JsonElement element, ScreenClicker.MarkedWindowInfo window, bool includeWindowChrome, out ClickerPlanStep? step)
+        {
+            step = null;
+            int delayMs = ReadDelayMs(element);
+
+            if (element.ValueKind == JsonValueKind.Object
+                && TryReadStringProperty(element, out string? pointerKind, "pointer", "action")
+                && TryReadStringProperty(element, out string? elementName, "element", "target", "label")
+                && !string.IsNullOrWhiteSpace(pointerKind)
+                && pointerKind.Contains("click", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(elementName))
+            {
+                return false;
+            }
+
+            string json = JsonSerializer.Serialize(element);
+            if (this.Clicker.TryParseClickPoint(json, window, includeWindowChrome, out var parsedCommand, out _, out _)
+                && parsedCommand != null)
+            {
+                step = new ClickerPlanStep(parsedCommand.Point, parsedCommand.Action, null, ScreenClicker.KeyboardAction.Press, null, delayMs);
+                return true;
+            }
+
+            if (TryReadTypeText(element, out string? typeText) && !string.IsNullOrWhiteSpace(typeText))
+            {
+                step = new ClickerPlanStep(null, ScreenClicker.PointerAction.Click, [], ScreenClicker.KeyboardAction.Type, typeText.Trim(), delayMs);
+                return true;
+            }
+
+            if (TryReadKeys(element, out List<string>? keys) && keys != null && keys.Count > 0)
+            {
+                step = new ClickerPlanStep(null, ScreenClicker.PointerAction.Click, keys, ParseKeyboardAction(element), null, delayMs);
+                return true;
+            }
+
+            if (delayMs > 0)
+            {
+                step = new ClickerPlanStep(null, ScreenClicker.PointerAction.Click, null, ScreenClicker.KeyboardAction.Press, null, delayMs);
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryReadStringProperty(JsonElement element, out string? value, params string[] names)
+        {
+            value = null;
+            if (element.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            foreach (string name in names)
+            {
+                if (element.TryGetProperty(name, out JsonElement property) && property.ValueKind == JsonValueKind.String)
+                {
+                    value = property.GetString();
+                    return !string.IsNullOrWhiteSpace(value);
+                }
+            }
+
+            return false;
+        }
+
+        private static string DescribeClickerPlan(IReadOnlyList<ClickerPlanStep> steps)
+        {
+            if (steps.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            string summary = string.Join(" -> ", steps.Take(8).Select(s => s.Describe()));
+            return TrimForHistory(summary);
+        }
+
+        private static string DescribeClickerPlanStep(ClickerPlanStep step)
+        {
+            return $"{step.Describe()}, delay_ms={step.DelayMs}";
+        }
+
+        private static bool TryReadTypeText(JsonElement element, out string? text)
+        {
+            text = null;
+            if (element.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            foreach (string propertyName in new[] { "type_text", "input_text", "text_input" })
+            {
+                if (element.TryGetProperty(propertyName, out JsonElement property) && property.ValueKind == JsonValueKind.String)
+                {
+                    text = property.GetString();
+                    return !string.IsNullOrWhiteSpace(text);
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryReadKeys(JsonElement element, out List<string>? keys)
+        {
+            keys = [];
+            if (element.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            foreach (string propertyName in new[] { "keys", "combo", "shortcut", "hotkey" })
+            {
+                if (!element.TryGetProperty(propertyName, out JsonElement property))
+                {
+                    continue;
+                }
+
+                if (property.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement item in property.EnumerateArray())
+                    {
+                        if (item.ValueKind == JsonValueKind.String)
+                        {
+                            AddKeys(keys, item.GetString());
+                        }
+                    }
+                }
+                else if (property.ValueKind == JsonValueKind.String)
+                {
+                    AddKeys(keys, property.GetString());
+                }
+            }
+
+            if (keys.Count == 0 && element.TryGetProperty("key", out JsonElement keyProperty) && keyProperty.ValueKind == JsonValueKind.String)
+            {
+                AddKeys(keys, keyProperty.GetString());
+            }
+
+            return keys.Count > 0;
+        }
+
+        private static void AddKeys(List<string> keys, string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return;
+            }
+
+            foreach (string piece in value.Split(new[] { '+', ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (!keys.Contains(piece, StringComparer.OrdinalIgnoreCase))
+                {
+                    keys.Add(piece);
+                }
+            }
+        }
+
+        private static ScreenClicker.KeyboardAction ParseKeyboardAction(JsonElement element)
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+            {
+                return ScreenClicker.KeyboardAction.Press;
+            }
+
+            foreach (string propertyName in new[] { "action", "keyboard_action", "key_action", "event" })
+            {
+                if (!element.TryGetProperty(propertyName, out JsonElement property) || property.ValueKind != JsonValueKind.String)
+                {
+                    continue;
+                }
+
+                string action = property.GetString()?.Trim().ToLowerInvariant() ?? string.Empty;
+                if (action is "keydown" or "key-down" or "key_down" or "down")
+                {
+                    return ScreenClicker.KeyboardAction.Down;
+                }
+
+                if (action is "keyup" or "key-up" or "key_up" or "up")
+                {
+                    return ScreenClicker.KeyboardAction.Up;
+                }
+
+                if (action is "type" or "type_text" or "text")
+                {
+                    return ScreenClicker.KeyboardAction.Type;
+                }
+            }
+
+            return ScreenClicker.KeyboardAction.Press;
+        }
+
+        private static int ReadDelayMs(JsonElement element)
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+            {
+                return 0;
+            }
+
+            foreach (string propertyName in new[] { "delay_ms", "delayMs", "wait_ms", "sleep_ms" })
+            {
+                if (element.TryGetProperty(propertyName, out JsonElement property)
+                    && TryReadDouble(property, out double delay)
+                    && delay > 0)
+                {
+                    return Math.Clamp((int)Math.Round(delay), 1, 30000);
+                }
+            }
+
+            foreach (string propertyName in new[] { "delay_seconds", "delaySeconds", "wait_seconds" })
+            {
+                if (element.TryGetProperty(propertyName, out JsonElement property)
+                    && TryReadDouble(property, out double seconds)
+                    && seconds > 0)
+                {
+                    return Math.Clamp((int)Math.Round(seconds * 1000.0), 1, 30000);
+                }
+            }
+
+            return 0;
+        }
+
+        private static bool TryReadDouble(JsonElement element, out double value)
+        {
+            value = 0;
+            if (element.ValueKind == JsonValueKind.Number)
+            {
+                return element.TryGetDouble(out value);
+            }
+
+            if (element.ValueKind == JsonValueKind.String)
+            {
+                return double.TryParse(element.GetString(), out value);
+            }
+
+            return false;
+        }
+
+        private static IEnumerable<string> EnumerateJsonCandidates(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                yield break;
+            }
+
+            string trimmed = text.Trim();
+            yield return trimmed;
+
+            int firstBrace = trimmed.IndexOf('{');
+            int lastBrace = trimmed.LastIndexOf('}');
+            if (firstBrace >= 0 && lastBrace > firstBrace)
+            {
+                yield return trimmed[firstBrace..(lastBrace + 1)];
+            }
+        }
+
+        private sealed record ClickerPlanStep(
+            ScreenClicker.ClickPoint? Pointer,
+            ScreenClicker.PointerAction PointerAction,
+            List<string>? Keys,
+            ScreenClicker.KeyboardAction KeyboardAction,
+            string? TypeText,
+            int DelayMs)
+        {
+            public bool IsPointer => this.Pointer != null;
+            public bool IsKeyboard => !this.IsPointer && (!string.IsNullOrWhiteSpace(this.TypeText) || (this.Keys?.Count ?? 0) > 0);
+
+            public string Describe()
+            {
+                if (this.IsPointer && this.Pointer != null)
+                {
+                    return $"{this.PointerAction} @{this.Pointer.X:0.##},{this.Pointer.Y:0.##}";
+                }
+
+                if (!string.IsNullOrWhiteSpace(this.TypeText))
+                {
+                    return $"Type \"{TrimForHistory(this.TypeText)}\"";
+                }
+
+                if ((this.Keys?.Count ?? 0) > 0)
+                {
+                    return $"Key {this.KeyboardAction} {string.Join("+", this.Keys!)}";
+                }
+
+                return this.DelayMs > 0 ? $"Delay {this.DelayMs}ms" : "Step";
+            }
+        }
+
+        private sealed record ClickerUserQuestion(string Title, string Question, List<string> Options, string NormalizedJson, string Kind, bool AddTextOption, string TextLabel, string TextPlaceholder, string SubmitText);
 
         private async Task RestorePromptInputFocusAsync()
         {
@@ -793,11 +2255,16 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 return (false, null);
             }
 
+            screenshotPath = await this.TryCropClickerScreenshotToInteractionRegionAsync(window, screenshotPath, cancellationToken);
+            if (string.IsNullOrWhiteSpace(screenshotPath) || !File.Exists(screenshotPath))
+            {
+                this.LastActionMessage = "Could not crop the marked window screenshot.";
+                return (false, null);
+            }
+
             this.DeleteLastClickerScreenshot();
             this.clickerLastScreenshotPath = screenshotPath;
             this.ClickerScreenshotDataUrl = "data:image/png;base64," + Convert.ToBase64String(await File.ReadAllBytesAsync(screenshotPath, cancellationToken));
-            this.ClickerPreviewMarkerLeftPercent = null;
-            this.ClickerPreviewMarkerTopPercent = null;
             this.RequestUiRefresh();
             return (true, window);
         }
@@ -805,7 +2272,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         private bool TryFindBlockingProtectedZone(ScreenClicker.MarkedWindowInfo window, Point screenPoint, bool includeWindowChrome, out ClickerProtectedZone? protectedZone)
         {
             protectedZone = null;
-            Rectangle referenceBounds = this.Clicker.GetReferenceBounds(window, includeWindowChrome);
+            Rectangle referenceBounds = this.GetClickerEffectiveReferenceBounds(window, includeWindowChrome);
             if (referenceBounds.Width <= 0 || referenceBounds.Height <= 0)
             {
                 return false;
@@ -822,6 +2289,57 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 && normalizedY <= zone.BottomNormalized);
 
             return protectedZone != null;
+        }
+
+        private async Task<string?> TryCropClickerScreenshotToInteractionRegionAsync(ScreenClicker.MarkedWindowInfo window, string screenshotPath, CancellationToken cancellationToken)
+        {
+            if (!this.ClickerLimitInteractionRegion)
+            {
+                return screenshotPath;
+            }
+
+            Rectangle fullBounds = this.Clicker.GetReferenceBounds(window, this.ClickerIncludeWindowChrome);
+            Rectangle limitedBounds = this.GetClickerEffectiveReferenceBounds(window, this.ClickerIncludeWindowChrome);
+            if (limitedBounds == fullBounds)
+            {
+                return screenshotPath;
+            }
+
+            try
+            {
+                using var bitmap = new Bitmap(screenshotPath);
+                Rectangle crop = new(
+                    Math.Max(0, limitedBounds.Left - fullBounds.Left),
+                    Math.Max(0, limitedBounds.Top - fullBounds.Top),
+                    Math.Min(bitmap.Width, limitedBounds.Width),
+                    Math.Min(bitmap.Height, limitedBounds.Height));
+
+                if (crop.Width <= 0 || crop.Height <= 0 || crop.Right > bitmap.Width || crop.Bottom > bitmap.Height)
+                {
+                    return screenshotPath;
+                }
+
+                using var cropped = bitmap.Clone(crop, bitmap.PixelFormat);
+                string croppedPath = Path.Combine(Path.GetDirectoryName(screenshotPath)!, Path.GetFileNameWithoutExtension(screenshotPath) + "_region.png");
+                cropped.Save(croppedPath, System.Drawing.Imaging.ImageFormat.Png);
+                await Task.CompletedTask;
+
+                try
+                {
+                    File.Delete(screenshotPath);
+                }
+                catch
+                {
+                }
+
+                await StaticLogger.LogAsync($"[Clicker] Cropped screenshot to limited interaction region: {crop.X},{crop.Y} {crop.Width}x{crop.Height}");
+                return croppedPath;
+            }
+            catch (Exception ex)
+            {
+                await StaticLogger.LogAsync(ex, "[Clicker] Could not crop screenshot to interaction region");
+                return screenshotPath;
+            }
         }
 
         private async Task CancelClickerProtectedZoneSelectionAsync(string message)
@@ -991,7 +2509,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
             this.clickerLoopCts = null;
             this.IsClickerProtectedZoneSelectionActive = false;
-            this.Clicker.ReleaseHeldPointer();
+            this.CancelPendingClickerQuestion();
+            this.Clicker.ReleaseHeldInputs();
             this.DeleteLastClickerScreenshot();
         }
 

@@ -335,6 +335,7 @@
     border-radius: 0.65rem;
     padding: 0.75rem;
     background: var(--rz-base-background-color, #fff);
+    min-height: 0;
 }
 
 .clicker-status-title,
@@ -347,6 +348,10 @@
 
 .clicker-status-value {
     word-break: break-word;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 7rem;
+    overflow: auto;
 }
 
 .clicker-reason-text {
@@ -366,6 +371,16 @@
     align-items: flex-start;
     width: 100%;
     overflow: auto;
+}
+
+.clicker-prompt-box {
+    width: 100%;
+}
+
+.clicker-prompt-box .rz-form-field,
+.clicker-prompt-box .rz-form-field-content,
+.clicker-prompt-box textarea {
+    width: 100%;
 }
 
 .clicker-preview-stage {
@@ -483,8 +498,8 @@
 
 .clicker-preview-marker {
     position: absolute;
-    width: 26px;
-    height: 26px;
+    width: 34px;
+    height: 34px;
     transform: translate(-50%, -50%);
     pointer-events: none;
     mix-blend-mode: difference;
@@ -498,18 +513,17 @@
     left: 50%;
     top: 50%;
     background: #ffffff;
-    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
 }
 
 .clicker-preview-marker::before {
-    width: 24px;
+    width: 32px;
     height: 3px;
     transform: translate(-50%, -50%);
 }
 
 .clicker-preview-marker::after {
     width: 3px;
-    height: 24px;
+    height: 32px;
     transform: translate(-50%, -50%);
 }
 
@@ -525,25 +539,28 @@
 
 .clicker-response-block {
     margin: 0;
-    padding: 0.75rem;
+    padding: 0.55rem 0.6rem;
     border-radius: 0.5rem;
     background: rgba(0, 0, 0, 0.04);
     white-space: pre-wrap;
     word-break: break-word;
     overflow-wrap: anywhere;
-    max-height: none;
-    overflow: visible;
+    line-height: 1.3;
+    max-height: 11rem;
+    overflow: auto;
 }
 
 .clicker-reason-block {
     margin: 0 0 0.65rem;
-    padding: 0.75rem;
+    padding: 0.5rem 0.6rem;
     border-radius: 0.5rem;
     background: rgba(25, 118, 210, 0.08);
     white-space: pre-wrap;
     word-break: break-word;
     overflow-wrap: anywhere;
-    line-height: 1.45;
+    line-height: 1.3;
+    max-height: 7rem;
+    overflow: auto;
 }
 
 .collapse-btn {

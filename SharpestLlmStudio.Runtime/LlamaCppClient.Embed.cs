@@ -13,6 +13,11 @@ namespace SharpestLlmStudio.Runtime
     {
         public async Task<float[]> CreateEmbeddingAsync(string content, CancellationToken cancellationToken = default)
         {
+            if (this.IsRemoteMode)
+            {
+                return await this.CreateRemoteEmbeddingAsync(content, cancellationToken);
+            }
+
             if (!this.IsServerRunning || string.IsNullOrWhiteSpace(this.CurrentBaseUrl))
             {
                 throw new InvalidOperationException("llama.cpp server is not running. Load a model first.");
@@ -217,6 +222,47 @@ namespace SharpestLlmStudio.Runtime
 
             // Local fallback: hash-based bag-of-words embedding
             // Works without server support, sufficient for keyword-based similarity
+            return CreateLocalEmbedding(content);
+        }
+
+        private async Task<float[]> CreateRemoteEmbeddingAsync(string content, CancellationToken cancellationToken)
+        {
+            if (!this.IsRemoteMode || string.IsNullOrWhiteSpace(this._remoteEmbeddingModelId))
+            {
+                return CreateLocalEmbedding(content);
+            }
+
+            try
+            {
+                var payload = new JsonObject
+                {
+                    ["model"] = this._remoteEmbeddingModelId,
+                    ["input"] = content
+                };
+
+                using var response = await this._httpClient.PostAsJsonAsync(this.GetRemoteEmbeddingsUrl(), payload, cancellationToken);
+                if (response.IsSuccessStatusCode)
+                {
+                    var json = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken);
+                    var embeddingNode = json?["data"]?[0]?["embedding"]?.AsArray();
+                    if (embeddingNode != null && embeddingNode.Count > 0)
+                    {
+                        var vector = new float[embeddingNode.Count];
+                        for (int i = 0; i < embeddingNode.Count; i++)
+                        {
+                            vector[i] = embeddingNode[i]?.GetValue<float>() ?? 0f;
+                        }
+
+                        this.TouchServerActivity();
+                        return vector;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                await StaticLogger.LogAsync($"[RemoteLLM] Embedding request failed ({ex.Message}). Falling back to local embedding.");
+            }
+
             return CreateLocalEmbedding(content);
         }
 

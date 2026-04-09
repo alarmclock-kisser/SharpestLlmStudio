@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Drawing;
+using System.Net;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Runtime.Versioning;
@@ -80,6 +81,7 @@ namespace SharpestLlmStudio.Runtime
             int maxRetries = 5;
             int retryCount = 0;
             bool powerProfilingStarted = false;
+            bool isRemoteMode = this.IsRemoteMode;
 
             try
             {
@@ -166,7 +168,7 @@ namespace SharpestLlmStudio.Runtime
 
                             completed = true;
                         }
-                        catch (HttpRequestException ex) when (ex.Message.Contains("400") && ex.Message.Contains("context", StringComparison.OrdinalIgnoreCase) && retryCount < maxRetries && !emittedChunks)
+                        catch (HttpRequestException ex) when (!isRemoteMode && ex.Message.Contains("400") && ex.Message.Contains("context", StringComparison.OrdinalIgnoreCase) && retryCount < maxRetries && !emittedChunks)
                         {
                             retryCount++;
                             await StaticLogger.LogAsync($"[LlamaCpp] Context overflow on attempt {retryCount}, trimming oldest messages and retrying...");
@@ -227,6 +229,7 @@ namespace SharpestLlmStudio.Runtime
                 }
                 catch (Exception ex)
                 {
+                    try { await this.ClearServerContextAsync(cancellationToken: cancellationToken); } catch { }
                     streamChannel.Writer.TryComplete(ex);
                 }
                 finally
@@ -354,7 +357,7 @@ namespace SharpestLlmStudio.Runtime
             messages.Add(new JsonObject
             {
                 ["role"] = "user",
-                ["content"] = BuildUserContent(request.Prompt, normalizedImages)
+                ["content"] = this.BuildUserContent(request.Prompt, normalizedImages)
             });
 
             var payload = new JsonObject
@@ -363,9 +366,35 @@ namespace SharpestLlmStudio.Runtime
                 ["stream"] = request.Stream,
                 ["temperature"] = request.Temperature,
                 ["top_p"] = request.TopP,
-                ["top_k"] = request.TopK,
                 ["cache_prompt"] = !request.Isolated
             };
+
+            // Filter payload fields according to remote provider capabilities when in remote mode
+            if (this.IsRemoteMode)
+            {
+                var caps = RemoteProviderCapabilities.Get(this._remoteProvider ?? RemoteLlmProvider.CustomOpenAiCompatible, isLocal: false);
+                // If provider does not allow top_k, ensure it's not present
+                if (!caps.AllowTopK && payload.ContainsKey("top_k")) payload.Remove("top_k");
+                // repetition_penalty handled below
+            }
+            else
+            {
+                // local case: include top_k
+                payload["top_k"] = request.TopK;
+            }
+
+            // Only include provider-specific inference params when talking to local llama.cpp
+            // Remote providers (e.g. Gemini/OpenAI-compatible endpoints) often reject fields like top_k or repetition_penalty.
+            if (!this.IsRemoteMode)
+            {
+                payload["top_k"] = request.TopK;
+            }
+
+            if (this.IsRemoteMode && !string.IsNullOrWhiteSpace(this._remoteModelId))
+            {
+                payload["model"] = this._remoteModelId;
+                payload.Remove("cache_prompt");
+            }
 
             // 0 = unlimited (omit max_tokens)
             if (request.MaxTokens > 0)
@@ -373,10 +402,21 @@ namespace SharpestLlmStudio.Runtime
                 payload["max_tokens"] = Math.Max(1, request.MaxTokens);
             }
 
-            // Repetition penalty (optional)
+            // Repetition penalty (optional) - only include if allowed by provider
             if (request.RepetitionPenalty > 0.0 && Math.Abs(request.RepetitionPenalty - 1.0) > 1e-9)
             {
-                payload["repetition_penalty"] = request.RepetitionPenalty;
+                if (!this.IsRemoteMode)
+                {
+                    payload["repetition_penalty"] = request.RepetitionPenalty;
+                }
+                else
+                {
+                    var caps = RemoteProviderCapabilities.Get(this._remoteProvider ?? RemoteLlmProvider.CustomOpenAiCompatible, isLocal: false);
+                    if (caps.AllowRepetitionPenalty)
+                    {
+                        payload["repetition_penalty"] = request.RepetitionPenalty;
+                    }
+                }
             }
 
             if (request.StopSequences is { Length: > 0 })
@@ -396,22 +436,17 @@ namespace SharpestLlmStudio.Runtime
             return payload;
         }
 
-        private static JsonNode BuildUserContent(string prompt, List<string> normalizedImages)
+        private JsonNode BuildUserContent(string prompt, List<string> normalizedImages)
         {
             if (normalizedImages.Count == 0)
             {
                 return JsonValue.Create(prompt)!;
             }
 
-            var contentArray = new JsonArray
-            {
-                new JsonObject
-                {
-                    ["type"] = "text",
-                    ["text"] = prompt
-                }
-            };
+            var contentArray = new JsonArray();
 
+            // Images FIRST — VL model templates (Qwen3VL, LLaVA, etc.) expect image
+            // content parts before the text part in the content array.
             foreach (var image in normalizedImages)
             {
                 contentArray.Add(new JsonObject
@@ -424,77 +459,194 @@ namespace SharpestLlmStudio.Runtime
                 });
             }
 
+            contentArray.Add(new JsonObject
+            {
+                ["type"] = "text",
+                ["text"] = prompt
+            });
+
             return contentArray;
         }
 
         private async Task<string> GenerateSingleChatCompletionAsync(JsonObject payload, CancellationToken cancellationToken)
         {
-            using var response = await this._httpClient.PostAsJsonAsync($"{this.CurrentBaseUrl}/v1/chat/completions", payload, cancellationToken);
-            if (!response.IsSuccessStatusCode)
+            string url = this.IsRemoteMode ? this.GetRemoteChatCompletionsUrl() : $"{this.CurrentBaseUrl}/v1/chat/completions";
+            int maxAttempts = this.IsRemoteMode ? 3 : 1;
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
             {
-                string errorBody = string.Empty;
-                try { errorBody = await response.Content.ReadAsStringAsync(cancellationToken); } catch { }
-                throw new HttpRequestException($"llama.cpp returned {(int)response.StatusCode} ({response.ReasonPhrase}). {errorBody}");
+                using var response = await this._httpClient.PostAsJsonAsync(url, payload, cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                {
+                    string errorBody = string.Empty;
+                    try { errorBody = await response.Content.ReadAsStringAsync(cancellationToken); } catch { }
+
+                    if (this.IsRemoteMode
+                        && attempt < maxAttempts
+                        && IsTransientRemoteStatus(response.StatusCode))
+                    {
+                        await StaticLogger.LogAsync($"[LlamaCpp] Remote transient error {(int)response.StatusCode} ({response.ReasonPhrase}) on attempt {attempt}/{maxAttempts}. Retrying.");
+                        await Task.Delay(250 * attempt, cancellationToken);
+                        continue;
+                    }
+
+                    string upstreamLabel = this.IsRemoteMode ? "Remote provider" : "llama.cpp";
+
+                    // Try to parse remote error and extract field violations for better UI hints
+                    try
+                    {
+                        var node = JsonNode.Parse(errorBody);
+                        if (node != null && node["error"] is JsonObject err)
+                        {
+                            string msg = err["message"]?.GetValue<string>() ?? errorBody;
+                            var violations = new List<string>();
+                            if (err["details"] is JsonArray detailsArr)
+                            {
+                                foreach (var d in detailsArr)
+                                {
+                                    try
+                                    {
+                                        var fv = d?[@"@type"]?.ToString();
+                                        if (d is JsonObject dobj && dobj["fieldViolations"] is JsonArray fvArr)
+                                        {
+                                            foreach (var fvObj in fvArr)
+                                            {
+                                                var desc = fvObj?["description"]?.GetValue<string>();
+                                                if (!string.IsNullOrWhiteSpace(desc))
+                                                {
+                                                    // try to extract field name from description text
+                                                    var m1 = System.Text.RegularExpressions.Regex.Match(desc, "\\\"([^\\\"]+)\\\"");
+                                                    if (m1.Success)
+                                                    {
+                                                        violations.Add(m1.Groups[1].Value);
+                                                    }
+                                                    else
+                                                    {
+                                                        violations.Add(desc);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch { }
+                                }
+                            }
+
+                            string combined = !string.IsNullOrWhiteSpace(msg) ? msg : errorBody;
+                            if (violations.Count > 0)
+                            {
+                                combined += " Field violations: " + string.Join(", ", violations.Distinct());
+                            }
+
+                            throw new HttpRequestException($"{upstreamLabel} returned {(int)response.StatusCode} ({response.ReasonPhrase}). {combined}");
+                        }
+                    }
+                    catch
+                    {
+                        // fall back to full body
+                    }
+
+                    throw new HttpRequestException($"{upstreamLabel} returned {(int)response.StatusCode} ({response.ReasonPhrase}). {errorBody}");
+                }
+
+                var json = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken);
+                var content = json?["choices"]?[0]?["message"]?["content"]?.GetValue<string>();
+                return content ?? string.Empty;
             }
 
-            var json = await response.Content.ReadFromJsonAsync<JsonObject>(cancellationToken: cancellationToken);
-            var content = json?["choices"]?[0]?["message"]?["content"]?.GetValue<string>();
-            return content ?? string.Empty;
+            throw new HttpRequestException("Remote provider returned no successful response after retries.");
         }
 
         private async IAsyncEnumerable<string> StreamChatCompletionChunksAsync(JsonObject payload, [EnumeratorCancellation] CancellationToken cancellationToken)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, $"{this.CurrentBaseUrl}/v1/chat/completions")
-            {
-                Content = JsonContent.Create(payload)
-            };
+            string url = this.IsRemoteMode ? this.GetRemoteChatCompletionsUrl() : $"{this.CurrentBaseUrl}/v1/chat/completions";
+            int maxAttempts = this.IsRemoteMode ? 3 : 1;
+            HttpResponseMessage? response = null;
 
-            using var response = await this._httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            if (!response.IsSuccessStatusCode)
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
             {
+                using var request = new HttpRequestMessage(HttpMethod.Post, url)
+                {
+                    Content = JsonContent.Create(payload)
+                };
+
+                response = await this._httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                if (response.IsSuccessStatusCode)
+                {
+                    break;
+                }
+
                 string errorBody = string.Empty;
                 try { errorBody = await response.Content.ReadAsStringAsync(cancellationToken); } catch { }
-                throw new HttpRequestException($"llama.cpp returned {(int)response.StatusCode} ({response.ReasonPhrase}). {errorBody}");
+
+                if (this.IsRemoteMode
+                    && attempt < maxAttempts
+                    && IsTransientRemoteStatus(response.StatusCode))
+                {
+                    await StaticLogger.LogAsync($"[LlamaCpp] Remote transient stream error {(int)response.StatusCode} ({response.ReasonPhrase}) on attempt {attempt}/{maxAttempts}. Retrying.");
+                    response.Dispose();
+                    response = null;
+                    await Task.Delay(250 * attempt, cancellationToken);
+                    continue;
+                }
+
+                string upstreamLabel = this.IsRemoteMode ? "Remote provider" : "llama.cpp";
+                throw new HttpRequestException($"{upstreamLabel} returned {(int)response.StatusCode} ({response.ReasonPhrase}). {errorBody}");
             }
 
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            using var reader = new StreamReader(stream);
-
-            while (!cancellationToken.IsCancellationRequested)
+            if (response == null)
             {
-                var line = await reader.ReadLineAsync(cancellationToken);
-                if (line == null)
-                {
-                    yield break;
-                }
+                throw new HttpRequestException("Remote provider returned no successful response after retries.");
+            }
 
-                if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
+            using (response)
+            {
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                using var reader = new StreamReader(stream);
 
-                var data = line[5..].Trim();
-                if (string.Equals(data, "[DONE]", StringComparison.OrdinalIgnoreCase))
+                while (!cancellationToken.IsCancellationRequested)
                 {
-                    yield break;
-                }
+                    var line = await reader.ReadLineAsync(cancellationToken);
+                    if (line == null)
+                    {
+                        yield break;
+                    }
 
-                JsonObject? json;
-                try
-                {
-                    json = JsonNode.Parse(data)?.AsObject();
-                }
-                catch
-                {
-                    continue;
-                }
+                    if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
 
-                var delta = json?["choices"]?[0]?["delta"]?["content"]?.GetValue<string>();
-                if (!string.IsNullOrEmpty(delta))
-                {
-                    yield return delta;
+                    var data = line[5..].Trim();
+                    if (string.Equals(data, "[DONE]", StringComparison.OrdinalIgnoreCase))
+                    {
+                        yield break;
+                    }
+
+                    JsonObject? json;
+                    try
+                    {
+                        json = JsonNode.Parse(data)?.AsObject();
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    var delta = json?["choices"]?[0]?["delta"]?["content"]?.GetValue<string>();
+                    if (!string.IsNullOrEmpty(delta))
+                    {
+                        yield return delta;
+                    }
                 }
             }
+        }
+
+        private static bool IsTransientRemoteStatus(HttpStatusCode statusCode)
+        {
+            return statusCode == HttpStatusCode.TooManyRequests
+                || statusCode == HttpStatusCode.BadGateway
+                || statusCode == HttpStatusCode.ServiceUnavailable
+                || statusCode == HttpStatusCode.GatewayTimeout;
         }
 
         [SupportedOSPlatform("windows")]
@@ -546,7 +698,8 @@ namespace SharpestLlmStudio.Runtime
                     {
                         byte[] bytes = await File.ReadAllBytesAsync(trimmed, cancellationToken);
                         string mime = GetMimeTypeByFileExtension(trimmed);
-                        result.Add($"data:{mime};base64,{Convert.ToBase64String(bytes)}");
+                        string dataUrl = $"data:{mime};base64,{Convert.ToBase64String(bytes)}";
+                        result.Add(dataUrl);
                     }
 
                     continue;
