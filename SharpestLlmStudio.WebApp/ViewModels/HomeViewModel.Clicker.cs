@@ -1194,7 +1194,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     Temperature = request.Temperature,
                     TopP = request.TopP,
                     TopK = request.TopK,
-                    MaxWidthAndHeight = Math.Max(192, request.MaxWidthAndHeight > 0 ? Math.Min(request.MaxWidthAndHeight, 256) : 256),
+                    MaxWidthAndHeight = Math.Max(192, request.MaxWidthAndHeight > 0 ? Math.Min(request.MaxWidthAndHeight, 512) : 512),
                     ImageFormat = "jpg",
                     Stream = false
                 };
@@ -1222,7 +1222,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                         Temperature = request.Temperature,
                         TopP = request.TopP,
                         TopK = request.TopK,
-                        MaxWidthAndHeight = 128,
+                        MaxWidthAndHeight = 256,
                         ImageFormat = "jpg",
                         Stream = false
                     };
@@ -1313,16 +1313,16 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 int longestEdge = Math.Max(bitmap.Width, bitmap.Height);
                 if (longestEdge <= 0)
                 {
-                    return 256;
+                    return 512;
                 }
 
                 double scale = Math.Clamp(this.ClickerModelImageScalePercent, 5, 100) / 100.0;
                 int scaled = Math.Max(128, (int)Math.Round(longestEdge * scale));
-                return Math.Clamp(scaled, 128, 256);
+                return Math.Clamp(scaled, 128, 1024);
             }
             catch
             {
-                return 256;
+                return 512;
             }
         }
 
@@ -1745,7 +1745,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     ? $"Last error: {LimitClickerPromptText(SanitizeClickerPromptText(this.clickerLastErrorFeedback), 260)}\n"
                     : string.Empty)
                 + $"Pointer held: {(this.Clicker.IsLeftButtonHeld ? "yes" : "no")}\n"
-                + $"Format: {{\"steps\":[step],\"reason\":\"short reason\"}}.\n"
+                + "Reason must explain exactly which target is chosen, why it is the correct next planned step, and what effect the action should cause.\n"
+                + $"Format: {{\"steps\":[step],\"reason\":\"strict explanation of target, intent, and expected result\"}}.\n"
                 + "Use screenshot-relative coordinates, preferably 0..1000.\n"
                 + "If no safe action exists, return {\"point_2d\":[-1,-1],\"action\":null,\"reason\":\"not found\"}.";
         }
@@ -1764,6 +1765,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 + (this.ClickerLimitInteractionRegion
                     ? $"Region: [{this.ClickerInteractionMinX},{this.ClickerInteractionMinY}]-[{this.ClickerInteractionMaxX},{this.ClickerInteractionMaxY}]. "
                     : string.Empty)
+                + "Reason must explain the chosen target, why it is the correct next planned step, and the expected effect. "
                 + "Reply JSON: {\"steps\":[{\"point_2d\":[x,y],\"action\":\"click\"}],\"reason\":\"...\"}. "
                 + "Keys: {\"keys\":[\"key\"],\"action\":\"press\"} or {\"type_text\":\"text\"}. "
                 + "Coords 0..1000. "
@@ -1772,7 +1774,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         private static string BuildCompactClickerSystemPrompt()
         {
-            return "You are a visual UI automation agent. You receive a screenshot and must decide the next action. Respond with a single JSON object containing a steps array and a reason string. Each step is one of: a pointer action with point_2d and action, a keyboard action with keys and action, or a text entry with type_text. Coordinates are relative to the screenshot in a 0..1000 range. Be precise, concise, and safe.";
+            return "You are a visual UI automation agent. You receive a screenshot and must decide the next action. Respond with a single JSON object containing a steps array and a reason string. The reason must be strict and explicit: identify the intended target, explain why it is the correct next planned action, and describe the expected effect on the UI. Each step is one of: a pointer action with point_2d and action, a keyboard action with keys and action, or a text entry with type_text. Coordinates are relative to the screenshot in a 0..1000 range. Be precise, concise, and safe.";
         }
 
         private static string SanitizeClickerPromptText(string? text)

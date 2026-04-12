@@ -306,7 +306,7 @@
 
                                     <details open>
                                         <summary style="cursor:pointer;user-select:none;">Live prompt preview</summary>
-                                        <pre style="white-space:pre-wrap;margin:0.5rem 0 0 0;font-size:0.82rem;line-height:1.35;">@($"Analyze the screenshot and return one JSON object only.\nTask: {VM.ClickerInstructions}\nUse screenshot-relative coordinates, preferably 0..1000.\nIf no safe action exists, return {{\"point_2d\":[-1,-1],\"action\":null,\"reason\":\"not found\"}}.")</pre>
+                                        <pre style="white-space:pre-wrap;margin:0.5rem 0 0 0;font-size:0.82rem;line-height:1.35;">@VM.BuildClickerPromptPreview()</pre>
                                     </details>
                                 </div>
                             </details>
@@ -405,7 +405,7 @@ Example (pointer + keyboard):
                                 <RadzenStack Gap="0.45rem" style="margin-top:0.5rem;">
                                     <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem">
                                         <RadzenCheckBox TValue="bool" @bind-Value="VM.ClickerUseChatInputAsLiveNote" />
-                                        <RadzenLabel Text="Use current chat input as live note during looping" />
+                                        <RadzenLabel Text="Allow take notes from chat input during looping" />
                                     </RadzenStack>
                                     <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" Gap="0.3rem">
                                         <RadzenCheckBox TValue="bool" @bind-Value="VM.ClickerTellModelAboutProtectedZones" />
