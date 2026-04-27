@@ -4275,6 +4275,14 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     : baseSystemPrompt.Trim() + "\n\n" + genParams;
             }
 
+            if (this.Settings.AddModelInfoToSystemPrompt)
+            {
+                string modelInfo = $"[Model Info: {(this.LoadedModel != null ? $"{this.LoadedModel.Name} ({this.Settings.DefaultContextSize} context) {(this.LoadedModel.MmprojFilePath != null ? " (mmproj (vision) loaded)" : " (no mmproj / vision loaded)")}" : "No model loaded")}]";
+                baseSystemPrompt = string.IsNullOrWhiteSpace(baseSystemPrompt)
+                    ? modelInfo
+                    : baseSystemPrompt.Trim() + "\n\n" + modelInfo;
+            }
+
             if (this.Settings.AddCurrentDateTimeToSystemPrompt)
             {
                 string currentDateTime = $"[Current Date and Time: {DateTime.Now}]";

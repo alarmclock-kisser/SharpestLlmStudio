@@ -35,6 +35,7 @@ namespace SharpestLlmStudio.Shared
         public Dictionary<string, string[]> AgentSystemPrompts { get; set; } = new Dictionary<string, string[]>();
 
         public bool AddGenerationParametesToSystemPrompt { get; set; } = false;
+        public bool AddModelInfoToSystemPrompt { get; set; } = false;
         public bool AddCurrentDateTimeToSystemPrompt { get; set; } = true;
         // Image handling defaults for generation
         // Use 0 to disable downsizing (send full-size images). Default is 720.
