@@ -3581,73 +3581,11 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 return;
             }
 
-            // Try to locate and extract the first JSON object/array from the provided text.
-            static string? TryExtractJson(string text)
-            {
-                if (string.IsNullOrWhiteSpace(text)) return null;
-                // Find first opening bracket '{' or '['
-                int start = -1;
-                char open = '\0';
-                for (int i = 0; i < text.Length; i++)
-                {
-                    if (text[i] == '{' || text[i] == '[')
-                    {
-                        start = i;
-                        open = text[i];
-                        break;
-                    }
-                }
-
-                if (start == -1) return null;
-
-                char close = open == '{' ? '}' : ']';
-                int depth = 0;
-                int end = -1;
-
-                for (int i = start; i < text.Length; i++)
-                {
-                    if (text[i] == open) depth++;
-                    else if (text[i] == close) depth--;
-
-                    if (depth == 0)
-                    {
-                        end = i;
-                        break;
-                    }
-                }
-
-                if (end == -1 || end <= start) return null;
-
-                var candidate = text.Substring(start, end - start + 1).Trim();
-                return candidate.Length > 0 ? candidate : null;
-            }
-
-            string? extracted = TryExtractJson(inputText);
-            if (extracted == null)
-            {
-                this.JsonImageInputHasError = true;
-                this.LastActionMessage = "Invalid JSON input.";
-                this.IsGenerating = false;
-                this.RequestUiRefresh();
-                return;
-            }
+            StaticLogics.TryParseJsonDocumentRelaxed(inputText, out jsonDoc, out _);
 
             try
             {
-                jsonDoc = JsonDocument.Parse(extracted, new JsonDocumentOptions { AllowTrailingCommas = true });
-            }
-            catch (JsonException)
-            {
-                this.JsonImageInputHasError = true;
-                this.LastActionMessage = "Invalid JSON input.";
-                this.IsGenerating = false;
-                this.RequestUiRefresh();
-                return;
-            }
-
-            try
-            {
-                var base64 = await ImageHandling.DrawJsonRectanglesOnImageFileAsync(tempPath, jsonDoc, this.JsonRenderColor, Math.Max(1, this.JsonRenderStrokeWidth), this.JsonRenderLabels);
+                var base64 = await ImageHandling.DrawJsonRectanglesOnImageFileAsync(tempPath, jsonDoc, inputText, this.JsonRenderColor, Math.Max(1, this.JsonRenderStrokeWidth), this.JsonRenderLabels);
                 if (!string.IsNullOrWhiteSpace(base64))
                 {
                     this.RenderedJsonImageDataUrl = "data:image/png;base64," + base64;
