@@ -263,6 +263,135 @@
     font-size: 0.82rem;
 }
 
+.llamacpp-update-status-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--rz-base-300);
+    border-radius: 0.65rem;
+    background: rgba(255, 193, 7, 0.06);
+}
+
+.llamacpp-update-status-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.llamacpp-update-status-label {
+    font-weight: 700;
+    font-size: 0.9rem;
+}
+
+.llamacpp-update-status-value {
+    font-size: 0.88rem;
+}
+
+.llamacpp-update-status-value.update-available {
+    color: #c77700;
+    font-weight: 700;
+}
+
+.llamacpp-update-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.35rem 0.9rem;
+    font-size: 0.82rem;
+    opacity: 0.86;
+    word-break: break-word;
+}
+
+.llamacpp-update-progress-inline {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.llamacpp-update-progress-text {
+    font-size: 0.82rem;
+    opacity: 0.82;
+    word-break: break-word;
+}
+
+.llamacpp-update-cuda-note {
+    padding: 0.65rem 0.75rem;
+    border-radius: 0.55rem;
+    background: rgba(25, 118, 210, 0.08);
+    font-size: 0.84rem;
+    line-height: 1.35;
+    word-break: break-word;
+}
+
+.llamacpp-update-popup-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1400;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background: rgba(0, 0, 0, 0.45);
+}
+
+.llamacpp-update-popup-card {
+    width: min(760px, 100%);
+    max-height: min(80vh, 760px);
+    overflow: auto;
+    border-radius: 12px;
+    background: var(--rz-base-background-color, #fff);
+    color: var(--rz-text-color, inherit);
+    box-shadow: 0 22px 52px rgba(0, 0, 0, 0.34);
+    border: 1px solid var(--rz-base-300);
+}
+
+.llamacpp-update-popup-header {
+    padding: 1rem 1rem 0.5rem;
+}
+
+.llamacpp-update-popup-title {
+    font-size: 1.05rem;
+    font-weight: 700;
+}
+
+.llamacpp-update-popup-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 0 1rem 1rem;
+}
+
+.llamacpp-update-popup-message {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.llamacpp-update-popup-path {
+    padding: 0.55rem 0.7rem;
+    border-radius: 0.5rem;
+    background: rgba(0, 0, 0, 0.05);
+    font-size: 0.8rem;
+    word-break: break-all;
+}
+
+.popup-meta {
+    padding: 0.2rem 0;
+}
+
+.popup-progress {
+    margin-top: 0.15rem;
+}
+
+.llamacpp-update-popup-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    padding: 0 1rem 1rem;
+}
+
 @keyframes knowledge-spin {
     from {
         transform: rotate(0deg);

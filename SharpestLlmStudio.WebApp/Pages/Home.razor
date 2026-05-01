@@ -224,9 +224,50 @@
                                                   ButtonStyle="ButtonStyle.Danger"
                                                   Disabled="@(VM.IsBusy || VM.IsKnowledgeBusy || VM.UseRemoteProvider || VM.UseWebChatProvider)"
                                                   Click="@VM.KillAllLlamaServerExeInstancesAsync" />
+
+                                    <RadzenButton Text="@VM.LlamaCppUpdateButtonText"
+                                                  Icon="system_update_alt"
+                                                  ButtonStyle="@(VM.HasLlamaCppUpdateAvailable ? ButtonStyle.Warning : ButtonStyle.Light)"
+                                                  Disabled="@(!VM.CanStartLlamaCppUpdate)"
+                                                  Click="@VM.StartLlamaCppUpdateAsync" />
+
+                                    <RadzenButton Text="Check llama.cpp"
+                                                  Icon="manage_search"
+                                                  ButtonStyle="ButtonStyle.Light"
+                                                  Disabled="@(VM.IsCheckingLlamaCppUpdate || VM.IsLlamaCppUpdateBusy)"
+                                                  Click="@(async () => await VM.CheckLlamaCppUpdateAvailabilityAsync(showPopup: true))" />
                                 </RadzenStack>
 
                                 <RadzenText TextStyle="TextStyle.Body2" class="rz-color-on-surface-variant">@(VM.UseWebChatProvider ? VM.WebChatConnectionStatus : VM.ModelLoadingTimeString)</RadzenText>
+
+                                @if (!VM.UseRemoteProvider && !VM.UseWebChatProvider)
+                                {
+                                    <div class="llamacpp-update-status-panel">
+                                        <div class="llamacpp-update-status-row">
+                                            <span class="llamacpp-update-status-label">llama.cpp</span>
+                                            <span class="llamacpp-update-status-value @(VM.HasLlamaCppUpdateAvailable ? "update-available" : null)">@VM.LlamaCppUpdateStatusText</span>
+                                        </div>
+                                        <div class="llamacpp-update-meta-grid">
+                                            <div>@VM.LlamaCppInstalledBuildText</div>
+                                            <div>@VM.LlamaCppLatestBuildText</div>
+                                            <div>@VM.LlamaCppDetectedBackendText</div>
+                                        </div>
+                                        @if (VM.LlamaCppHasCudaRuntimeBinaries)
+                                        {
+                                            <div class="llamacpp-update-progress-text">@VM.LlamaCppCudaRuntimeStatusText</div>
+                                        }
+                                        @if (VM.IsCheckingLlamaCppUpdate || VM.IsLlamaCppUpdateBusy)
+                                        {
+                                            <div class="llamacpp-update-progress-inline">
+                                                <RadzenProgressBar Value="@VM.LlamaCppUpdateProgressPercent" ShowValue="true" Style="width:100%;" />
+                                                @if (!string.IsNullOrWhiteSpace(VM.LlamaCppUpdateProgressText))
+                                                {
+                                                    <div class="llamacpp-update-progress-text">@VM.LlamaCppUpdateProgressText</div>
+                                                }
+                                            </div>
+                                        }
+                                    </div>
+                                }
 
                                 @if (!string.IsNullOrEmpty(VM.LastLoadError))
                                 {
@@ -898,6 +939,59 @@ Example (pointer + keyboard):
     </div>
 
     <div class="page-content-wrapper">
+        @if (VM.ShowLlamaCppUpdatePopup)
+        {
+            <div class="llamacpp-update-popup-backdrop">
+                <div class="llamacpp-update-popup-card">
+                    <div class="llamacpp-update-popup-header">
+                        <div class="llamacpp-update-popup-title">@VM.LlamaCppUpdatePopupTitle</div>
+                    </div>
+
+                    <div class="llamacpp-update-popup-body">
+                        <div class="llamacpp-update-popup-message">@VM.LlamaCppUpdatePopupMessage</div>
+
+                        @if (!string.IsNullOrWhiteSpace(VM.LlamaCppResolvedExecutablePath))
+                        {
+                            <div class="llamacpp-update-popup-path">@VM.LlamaCppResolvedExecutablePath</div>
+                        }
+
+                        <div class="llamacpp-update-meta-grid popup-meta">
+                            <div>@VM.LlamaCppInstalledBuildText</div>
+                            <div>@VM.LlamaCppLatestBuildText</div>
+                            <div>@VM.LlamaCppDetectedBackendText</div>
+                        </div>
+
+                        @if (VM.LlamaCppHasCudaRuntimeBinaries)
+                        {
+                            <div class="llamacpp-update-cuda-note">CUDA runtime DLLs were detected in the llama.cpp directory. They usually do not need to be updated with every llama.cpp build. Refresh them only if needed.</div>
+                            <div class="llamacpp-update-progress-text">@VM.LlamaCppCudaRuntimeStatusText</div>
+                        }
+
+                        @if (VM.IsCheckingLlamaCppUpdate || VM.IsLlamaCppUpdateBusy || VM.LlamaCppUpdateProgressPercent > 0)
+                        {
+                            <div class="llamacpp-update-progress-inline popup-progress">
+                                <RadzenProgressBar Value="@VM.LlamaCppUpdateProgressPercent" ShowValue="true" Style="width:100%;" />
+                                @if (!string.IsNullOrWhiteSpace(VM.LlamaCppUpdateProgressText))
+                                {
+                                    <div class="llamacpp-update-progress-text">@VM.LlamaCppUpdateProgressText</div>
+                                }
+                            </div>
+                        }
+                    </div>
+
+                    <div class="llamacpp-update-popup-actions">
+                        <RadzenButton Text="Close" ButtonStyle="ButtonStyle.Light" Disabled="@VM.IsLlamaCppUpdateBusy" Click="@VM.CloseLlamaCppUpdatePopup" />
+                        <RadzenButton Text="Check again" Icon="refresh" ButtonStyle="ButtonStyle.Light" Disabled="@(VM.IsCheckingLlamaCppUpdate || VM.IsLlamaCppUpdateBusy)" Click="@(async () => await VM.CheckLlamaCppUpdateAvailabilityAsync(showPopup: true))" />
+                        @if (VM.LlamaCppHasCudaRuntimeBinaries)
+                        {
+                            <RadzenButton Text="@VM.LlamaCppCudaRuntimeButtonText" Icon="memory" ButtonStyle="ButtonStyle.Light" Disabled="@(!VM.CanRefreshCudaRuntimeBinaries)" Click="@VM.ReDownloadCudaRuntimeBinariesAsync" />
+                        }
+                        <RadzenButton Text="Update now" Icon="system_update_alt" ButtonStyle="ButtonStyle.Warning" Disabled="@(!VM.CanStartLlamaCppUpdate)" Click="@VM.StartLlamaCppUpdateAsync" />
+                    </div>
+                </div>
+            </div>
+        }
+
         <div id="chat-output" class="page-content">
             <div class="home-shell">
     <RadzenCard class="chat-card">

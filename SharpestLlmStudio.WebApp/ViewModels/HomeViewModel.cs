@@ -28,6 +28,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         private readonly WebAppSettings Settings;
         private CancellationTokenSource? generationCts;
         private ElementReference messageContainerRef;
+        private long _lastLlamaCppProgressUiTick;
 
         public void RegisterStateChangeListener(Action listener)
         {
@@ -799,6 +800,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
         private readonly object lastActionMessageSync = new();
         private CancellationTokenSource? lastActionMessageCts;
+        private CancellationTokenSource? llamaCppUpdateCts;
         private string? lastActionMessage;
         public string? LastActionMessage
         {
@@ -847,6 +849,301 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
                 return "header-action-info";
             }
+        }
+        public bool IsCheckingLlamaCppUpdate { get; private set; }
+        public bool IsLlamaCppUpdateBusy { get; private set; }
+        public bool HasLlamaCppUpdateAvailable { get; private set; }
+        public bool ShowLlamaCppUpdatePopup { get; private set; }
+        public int LlamaCppUpdateProgressPercent { get; private set; }
+        public string LlamaCppUpdateProgressText { get; private set; } = string.Empty;
+        public string LlamaCppUpdateStatusText { get; private set; } = "llama.cpp update status not checked yet.";
+        public string LlamaCppInstalledBuildText { get; private set; } = "Installed build: unknown";
+        public string LlamaCppLatestBuildText { get; private set; } = "Latest build: unknown";
+        public string LlamaCppCudaRuntimeStatusText { get; private set; } = string.Empty;
+        public string LlamaCppUpdatePopupTitle { get; private set; } = "llama.cpp Update";
+        public string LlamaCppUpdatePopupMessage { get; private set; } = string.Empty;
+        public string LlamaCppResolvedExecutablePath { get; private set; } = string.Empty;
+        public string LlamaCppDetectedBackendText { get; private set; } = "Backend: unknown";
+        public bool LlamaCppHasCudaRuntimeBinaries { get; private set; }
+        public string LlamaCppUpdateButtonText => this.IsCheckingLlamaCppUpdate
+            ? "Checking..."
+            : this.IsLlamaCppUpdateBusy
+                ? "Updating..."
+                : "Update llama.cpp";
+        public string LlamaCppCudaRuntimeButtonText => this.IsLlamaCppUpdateBusy ? "Refreshing CUDA..." : "(Re-) Download CUDA Binaries";
+        public bool CanStartLlamaCppUpdate => this.HasLlamaCppUpdateAvailable
+            && !this.IsCheckingLlamaCppUpdate
+            && !this.IsLlamaCppUpdateBusy
+            && !this.IsBusy
+            && !this.IsKnowledgeBusy
+            && !this.UseRemoteProvider
+            && !this.UseWebChatProvider;
+        public bool CanRefreshCudaRuntimeBinaries => this.LlamaCppHasCudaRuntimeBinaries
+            && !this.IsCheckingLlamaCppUpdate
+            && !this.IsLlamaCppUpdateBusy
+            && !this.IsBusy
+            && !this.IsKnowledgeBusy
+            && !this.UseRemoteProvider
+            && !this.UseWebChatProvider;
+
+        public async Task CheckLlamaCppUpdateAvailabilityAsync(bool showPopup = false, CancellationToken cancellationToken = default)
+        {
+            if (this.IsCheckingLlamaCppUpdate || this.IsLlamaCppUpdateBusy)
+            {
+                return;
+            }
+
+            this.IsCheckingLlamaCppUpdate = true;
+            this.LlamaCppUpdateStatusText = "Checking GitHub for newer llama.cpp builds...";
+            this.LlamaCppUpdateProgressText = string.Empty;
+            this.RequestUiRefresh();
+
+            try
+            {
+                LlamaCppUpdateCheckResult result = await this.Client.CheckForLlamaCppUpdateAsync(cancellationToken);
+                this.HasLlamaCppUpdateAvailable = result.Success && result.UpdateAvailable;
+                this.LlamaCppHasCudaRuntimeBinaries = result.HasCudaRuntimeBinaries;
+                this.LlamaCppUpdateStatusText = GetLlamaCppUpdateSummaryText(result);
+                this.LlamaCppResolvedExecutablePath = result.ResolvedExecutablePath;
+                this.LlamaCppDetectedBackendText = $"Backend: {FormatLlamaBackend(result.Backend, result.BackendAssetHint)}";
+                this.LlamaCppCudaRuntimeStatusText = result.HasCudaRuntimeBinaries
+                    ? $"CUDA runtime DLLs detected. Separate refresh is optional and usually not necessary. {result.CudaRuntimeSummary}"
+                    : "No CUDA runtime DLLs detected in the llama.cpp directory.";
+
+                this.LlamaCppInstalledBuildText = result.ExecutableFound
+                    ? $"Installed build: {FormatInstalledBuild(result)}"
+                    : "Installed build: not found";
+
+                this.LlamaCppLatestBuildText = !string.IsNullOrWhiteSpace(result.LatestTag)
+                    ? $"Latest build: {result.LatestTag}{(result.LatestPublishedAtUtc.HasValue ? $" ({result.LatestPublishedAtUtc.Value.ToLocalTime():yyyy-MM-dd HH:mm})" : string.Empty)}"
+                    : "Latest build: not found";
+
+                if (this.HasLlamaCppUpdateAvailable)
+                {
+                    this.LastActionMessage = $"New llama.cpp build available: {result.LatestTag}";
+                }
+
+                if (showPopup || !result.Success || (!result.UpdateAvailable && result.ExecutableFound))
+                {
+                    this.LlamaCppUpdatePopupTitle = result.Success && result.UpdateAvailable ? "llama.cpp Update Available" : "llama.cpp Update Status";
+                    this.LlamaCppUpdatePopupMessage = result.StatusMessage;
+                    this.ShowLlamaCppUpdatePopup = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                this.HasLlamaCppUpdateAvailable = false;
+                this.LlamaCppUpdateStatusText = $"Update check failed: {ex.Message}";
+                this.LlamaCppUpdatePopupTitle = "llama.cpp Update Error";
+                this.LlamaCppUpdatePopupMessage = this.LlamaCppUpdateStatusText;
+                this.ShowLlamaCppUpdatePopup = true;
+                await StaticLogger.LogAsync(ex, "[HomeViewModel] llama.cpp update check failed");
+            }
+            finally
+            {
+                this.IsCheckingLlamaCppUpdate = false;
+                this.RequestUiRefresh();
+            }
+        }
+
+        public async Task ReDownloadCudaRuntimeBinariesAsync()
+        {
+            if (this.IsCheckingLlamaCppUpdate || this.IsLlamaCppUpdateBusy)
+            {
+                return;
+            }
+
+            if (this.IsLoaded && !this.UseRemoteProvider && !this.UseWebChatProvider)
+            {
+                this.LlamaCppUpdatePopupTitle = "CUDA Runtime Binaries";
+                this.LlamaCppUpdatePopupMessage = "Unload the local model before refreshing CUDA runtime binaries.";
+                this.ShowLlamaCppUpdatePopup = true;
+                this.RequestUiRefresh();
+                return;
+            }
+
+            this.llamaCppUpdateCts?.Cancel();
+            this.llamaCppUpdateCts?.Dispose();
+            this.llamaCppUpdateCts = new CancellationTokenSource();
+
+            this.IsLlamaCppUpdateBusy = true;
+            this.ShowLlamaCppUpdatePopup = true;
+            this.LlamaCppUpdatePopupTitle = "Refreshing CUDA Runtime Binaries";
+            this.LlamaCppUpdatePopupMessage = "Preparing CUDA runtime refresh...";
+            this.LlamaCppUpdateProgressPercent = 0;
+            this.LlamaCppUpdateProgressText = "Preparing CUDA runtime refresh...";
+            this.RequestUiRefresh();
+
+            try
+            {
+                var progress = new Progress<LlamaCppUpdateProgress>(update =>
+                {
+                    this.LlamaCppUpdateProgressPercent = Math.Clamp(update.Percent, 0, 100);
+                    this.LlamaCppUpdateProgressText = string.IsNullOrWhiteSpace(update.Message) ? update.Stage : update.Message;
+                    this.LlamaCppUpdatePopupMessage = this.LlamaCppUpdateProgressText;
+                    long nowTick = Environment.TickCount64;
+                    if (update.Percent >= 100 || nowTick - this._lastLlamaCppProgressUiTick >= 250)
+                    {
+                        this._lastLlamaCppProgressUiTick = nowTick;
+                        this.RequestUiRefresh();
+                    }
+                });
+
+                LlamaCppUpdateResult result = await this.Client.ReDownloadCudaRuntimeBinariesAsync(progress, this.llamaCppUpdateCts.Token);
+                this.LlamaCppUpdatePopupTitle = result.Success ? "CUDA Runtime Binaries Refreshed" : "CUDA Runtime Binaries";
+                this.LlamaCppUpdatePopupMessage = result.Message;
+                this.LlamaCppCudaRuntimeStatusText = result.Message;
+                this.LlamaCppUpdateProgressPercent = result.Success ? 100 : this.LlamaCppUpdateProgressPercent;
+                this.LlamaCppUpdateProgressText = result.Message;
+                this.LastActionMessage = result.Message;
+                await StaticLogger.LogAsync($"[HomeViewModel] {result.Message}");
+                await this.CheckLlamaCppUpdateAvailabilityAsync(showPopup: false, cancellationToken: CancellationToken.None);
+            }
+            catch (OperationCanceledException)
+            {
+                this.LlamaCppUpdatePopupTitle = "CUDA Runtime Binaries";
+                this.LlamaCppUpdatePopupMessage = "CUDA runtime binary refresh canceled.";
+                this.LlamaCppCudaRuntimeStatusText = this.LlamaCppUpdatePopupMessage;
+                this.LastActionMessage = this.LlamaCppUpdatePopupMessage;
+            }
+            catch (Exception ex)
+            {
+                this.LlamaCppUpdatePopupTitle = "CUDA Runtime Binaries Error";
+                this.LlamaCppUpdatePopupMessage = $"CUDA runtime binary refresh failed: {ex.Message}";
+                this.LlamaCppCudaRuntimeStatusText = this.LlamaCppUpdatePopupMessage;
+                this.LastActionMessage = this.LlamaCppUpdatePopupMessage;
+                await StaticLogger.LogAsync(ex, "[HomeViewModel] CUDA runtime binary refresh failed");
+            }
+            finally
+            {
+                this.IsLlamaCppUpdateBusy = false;
+                this.llamaCppUpdateCts?.Dispose();
+                this.llamaCppUpdateCts = null;
+                this.RequestUiRefresh();
+            }
+        }
+
+        public async Task StartLlamaCppUpdateAsync()
+        {
+            if (this.IsCheckingLlamaCppUpdate || this.IsLlamaCppUpdateBusy)
+            {
+                return;
+            }
+
+            if (this.IsLoaded && !this.UseRemoteProvider && !this.UseWebChatProvider)
+            {
+                this.LlamaCppUpdatePopupTitle = "llama.cpp Update";
+                this.LlamaCppUpdatePopupMessage = "Unload the local model before updating llama.cpp binaries.";
+                this.ShowLlamaCppUpdatePopup = true;
+                this.RequestUiRefresh();
+                return;
+            }
+
+            this.llamaCppUpdateCts?.Cancel();
+            this.llamaCppUpdateCts?.Dispose();
+            this.llamaCppUpdateCts = new CancellationTokenSource();
+
+            this.IsLlamaCppUpdateBusy = true;
+            this.ShowLlamaCppUpdatePopup = true;
+            this.LlamaCppUpdatePopupTitle = "Updating llama.cpp";
+            this.LlamaCppUpdatePopupMessage = "Preparing update...";
+            this.LlamaCppUpdateProgressPercent = 0;
+            this.LlamaCppUpdateProgressText = "Preparing update...";
+            this.RequestUiRefresh();
+
+            try
+            {
+                var progress = new Progress<LlamaCppUpdateProgress>(update =>
+                {
+                    this.LlamaCppUpdateProgressPercent = Math.Clamp(update.Percent, 0, 100);
+                    this.LlamaCppUpdateProgressText = string.IsNullOrWhiteSpace(update.Message) ? update.Stage : update.Message;
+                    this.LlamaCppUpdatePopupMessage = this.LlamaCppUpdateProgressText;
+                    long nowTick = Environment.TickCount64;
+                    if (update.Percent >= 100 || nowTick - this._lastLlamaCppProgressUiTick >= 250)
+                    {
+                        this._lastLlamaCppProgressUiTick = nowTick;
+                        this.RequestUiRefresh();
+                    }
+                });
+
+                LlamaCppUpdateResult result = await this.Client.UpdateLlamaCppAsync(progress, includeCudaRuntimeBinaries: false, cancellationToken: this.llamaCppUpdateCts.Token);
+                this.LlamaCppUpdatePopupTitle = result.Success ? "llama.cpp Updated" : result.UpToDate ? "llama.cpp Already Up To Date" : "llama.cpp Update";
+                this.LlamaCppUpdatePopupMessage = result.Message;
+                this.LlamaCppUpdateStatusText = result.Message;
+                this.LlamaCppUpdateProgressPercent = result.Success ? 100 : this.LlamaCppUpdateProgressPercent;
+                this.LlamaCppUpdateProgressText = result.Message;
+                this.LastActionMessage = result.Message;
+                await StaticLogger.LogAsync($"[HomeViewModel] {result.Message}");
+                await this.CheckLlamaCppUpdateAvailabilityAsync(showPopup: false, cancellationToken: CancellationToken.None);
+            }
+            catch (OperationCanceledException)
+            {
+                this.LlamaCppUpdatePopupTitle = "llama.cpp Update";
+                this.LlamaCppUpdatePopupMessage = "llama.cpp update canceled.";
+                this.LlamaCppUpdateStatusText = this.LlamaCppUpdatePopupMessage;
+                this.LastActionMessage = this.LlamaCppUpdatePopupMessage;
+            }
+            catch (Exception ex)
+            {
+                this.LlamaCppUpdatePopupTitle = "llama.cpp Update Error";
+                this.LlamaCppUpdatePopupMessage = $"llama.cpp update failed: {ex.Message}";
+                this.LlamaCppUpdateStatusText = this.LlamaCppUpdatePopupMessage;
+                this.LastActionMessage = this.LlamaCppUpdatePopupMessage;
+                await StaticLogger.LogAsync(ex, "[HomeViewModel] llama.cpp update failed");
+            }
+            finally
+            {
+                this.IsLlamaCppUpdateBusy = false;
+                this.llamaCppUpdateCts?.Dispose();
+                this.llamaCppUpdateCts = null;
+                this.RequestUiRefresh();
+            }
+        }
+
+        public void CloseLlamaCppUpdatePopup()
+        {
+            this.ShowLlamaCppUpdatePopup = false;
+            this.RequestUiRefresh();
+        }
+
+        private static string FormatInstalledBuild(LlamaCppUpdateCheckResult result)
+        {
+            string versionText = string.IsNullOrWhiteSpace(result.InstalledVersion) ? "unknown version" : result.InstalledVersion;
+            string dateText = result.InstalledFileDateUtc.HasValue
+                ? result.InstalledFileDateUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
+                : "unknown date";
+            return $"{versionText} ({dateText})";
+        }
+
+        private static string GetLlamaCppUpdateSummaryText(LlamaCppUpdateCheckResult result)
+        {
+            if (!result.Success)
+            {
+                return string.IsNullOrWhiteSpace(result.StatusMessage)
+                    ? "llama.cpp update check failed"
+                    : result.StatusMessage;
+            }
+
+            if (!result.ExecutableFound)
+            {
+                return "llama.cpp not installed";
+            }
+
+            return result.UpdateAvailable
+                ? "New llama.cpp build available"
+                : "llama.cpp up-to-date";
+        }
+
+        private static string FormatLlamaBackend(string backend, string backendHint)
+        {
+            if (string.IsNullOrWhiteSpace(backend))
+            {
+                return "unknown";
+            }
+
+            return string.IsNullOrWhiteSpace(backendHint)
+                ? backend.ToUpperInvariant()
+                : $"{backend.ToUpperInvariant()} ({backendHint})";
         }
         public bool MonitoringEnabled => this.Settings.EnableMonitoring;
         public bool HasSavedContextBaseline => !string.IsNullOrWhiteSpace(this.SelectedContextFilePath);
