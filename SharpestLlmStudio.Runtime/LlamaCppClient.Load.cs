@@ -80,10 +80,19 @@ namespace SharpestLlmStudio.Runtime
                 lock (this._serverStdout) { this._serverStdout.Clear(); }
 
                 // 2. Argumente zusammenbauen
-                // HIER WURDEN DIE GPU SPLIT ARGUMENTE HINZUGEFÜGT (-ts und -sm)
-                // -ts 4,3 (für 16GB auf GPU0 und 12GB auf GPU1. Falls umgekehrt erkannt, ändere dies zu -ts 3,4)
-                // -sm layer (damit beide Karten Pipeline-Parallelismus nutzen)
-                var args = $"-m \"{request.ModelInfo.ModelFilePath}\" -ngl {request.GpuLayers} -ts 4,3 -sm layer -c {request.ContextSize} -b {Math.Max(1, request.BatchSize)} -ub {Math.Max(1, request.UBatchSize)} --host {request.Host} --port {request.Port}";
+                // Use safe defaults for broad compatibility.
+                // NOTE: forcing tensor-split/split-mode can crash with some models/builds
+                // (e.g. GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS)).
+                var args = $"-m \"{request.ModelInfo.ModelFilePath}\" -ngl {request.GpuLayers} -c {request.ContextSize} -b {Math.Max(1, request.BatchSize)} -ub {Math.Max(1, request.UBatchSize)} --host {request.Host} --port {request.Port}";
+
+                // Stability workaround for scheduler split assertions on some CUDA builds/models:
+                // force a single parallel slot instead of auto parallelism.
+                args += " -np 1";
+
+                // Workaround for recent llama.cpp scheduler-fit crashes on some model/build combinations
+                // (GGML_ASSERT in ggml-backend.cpp during "fitting params to device memory").
+                // The upstream log itself suggests reproducing with "-fit off".
+                args += " -fit off";
 
                 // For Omni models, always include vision/encoder gguf as --mmproj if available
                 bool shouldIncludeMmproj = request.IncludeMmproj || request.ModelInfo.IsOmni;
@@ -272,6 +281,14 @@ namespace SharpestLlmStudio.Runtime
                 return message
                     + "\n\nHint: llama.cpp crashed inside ggml backend warmup for this GGUF. A common cause is Flash Attention being left on 'auto' and getting re-enabled internally. "
                     + "SharpestLlmStudio now passes '--flash-attn off' explicitly when the checkbox is unchecked. If it still fails, try a newer llama.cpp build and/or disabling warmup with '--no-warmup' in the server command line for this model.";
+            }
+
+            if (serverOutput.Contains("GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS)", StringComparison.OrdinalIgnoreCase)
+                || serverOutput.Contains("ggml-backend.cpp:1367", StringComparison.OrdinalIgnoreCase))
+            {
+                return message
+                    + "\n\nHint: llama.cpp aborted in the scheduler split path. This is commonly caused by forced tensor split/split-mode settings on an incompatible model/build combination. "
+                    + "SharpestLlmStudio now starts llama-server without forced '-ts/-sm' arguments, with '-fit off', and with '-np 1' (single parallel slot) by default for stability. If you still see this with an external command line, remove forced split flags and force single-slot parallelism.";
             }
 
             return message;

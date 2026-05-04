@@ -18,3 +18,5 @@
 
 ## Build and Maintenance
 - When asked to fix warnings in this repo, iterate with rebuilds until the warning count is zero and verify with a full rebuild.
+- For llama.cpp backend detection in this repo, prefer checking the installed runtime-specific DLLs in the llama.cpp directory directly (for example cublas64_13.dll, cublasLt64_13.dll, cudart64_13.dll) to infer CUDA backend/version.
+- For this repo's llama.cpp updater, note that CUDA runtime update packages do not contain llama-server.exe and must be handled without expecting an executable/binary folder.
