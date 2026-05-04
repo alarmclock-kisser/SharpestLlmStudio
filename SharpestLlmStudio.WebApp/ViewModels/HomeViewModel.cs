@@ -16,7 +16,7 @@ using System.Runtime.Versioning;
 using System.Net;
 using System.Text.RegularExpressions;
 
-namespace SharpestLlmStudio.WebApp.ViewModels
+namespace SharpestLlmStudio.WebApp.ViewModels 
 {
     [SupportedOSPlatform("windows")]
     public partial class HomeViewModel : IDisposable
