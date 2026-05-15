@@ -19,6 +19,16 @@ namespace SharpestLlmStudio.Shared
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
         private static readonly Regex OrderedListRegex = new(@"^\s*\d+[\.)]\s+(.*)$", RegexOptions.Compiled);
         private static readonly Regex UnorderedListRegex = new(@"^\s*[-*•]\s+(.*)$", RegexOptions.Compiled);
+        private static readonly Regex JsonFenceRegex = new(@"```(?:json|javascript|js|txt)?\s*(?<content>[\s\S]*?)```", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex HtmlTagRegex = new(@"</?(?!think\b)[a-z][^>]*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex MarkdownQuoteRegex = new(@"^\s*>+\s?", RegexOptions.Multiline | RegexOptions.Compiled);
+        private static readonly Regex JsonObjectStartLineRegex = new(@"(?m)(?<=^|\n)\s*\{\s*(?=""|\}|[\r\n])", RegexOptions.Compiled);
+        private static readonly Regex JsonArrayStartLineRegex = new(@"(?m)(?<=^|\n)\s*\[\s*(?=\{|\[|\]|[\r\n])", RegexOptions.Compiled);
+        private static readonly Regex JsonPropertyNameRegex = new(@"(?<=\{|,)(\s*)(?<name>[A-Za-z_][A-Za-z0-9_\- ]*)(\s*):", RegexOptions.Compiled);
+        private static readonly Regex TrailingCommaBeforeCloserRegex = new(@",\s*(?=[}\]])", RegexOptions.Compiled);
+        private static readonly Regex MultiCommaRegex = new(@",\s*,+", RegexOptions.Compiled);
+        private static readonly Regex Point2dRegex = new(@"(?:""point_2d""|point_2d)\s*:\s*\[\s*(?<x>-?\d+(?:[\.,]\d+)?)\s*,\s*(?<y>-?\d+(?:[\.,]\d+)?)\s*\]", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex Bbox2dRegex = new(@"(?:""bbox_2d""|bbox_2d)\s*:\s*\[\s*(?<x1>-?\d+(?:[\.,]\d+)?)\s*,\s*(?<y1>-?\d+(?:[\.,]\d+)?)\s*,\s*(?<x2>-?\d+(?:[\.,]\d+)?)\s*,\s*(?<y2>-?\d+(?:[\.,]\d+)?)\s*\]", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
 
 
@@ -242,21 +252,96 @@ namespace SharpestLlmStudio.Shared
         public static bool TryFormatJson(string text, out string formattedJson)
         {
             formattedJson = string.Empty;
+            return TryParseJsonDocumentRelaxed(text, out _, out formattedJson);
+        }
+
+        public static bool TryParseJsonDocumentRelaxed(string text, out JsonDocument? jsonDocument, out string normalizedJson)
+        {
+            jsonDocument = null;
+            normalizedJson = string.Empty;
             if (string.IsNullOrWhiteSpace(text))
             {
                 return false;
             }
 
-            string trimmed = text.Trim();
-            if (!trimmed.StartsWith("{") && !trimmed.StartsWith("["))
+            foreach (string candidate in EnumerateJsonCandidatesRelaxed(text))
+            {
+                if (TryParseJsonCandidate(candidate, out jsonDocument, out normalizedJson))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryParseJsonCandidate(string candidate, out JsonDocument? jsonDocument, out string normalizedJson)
+        {
+            jsonDocument = null;
+            normalizedJson = string.Empty;
+
+            if (string.IsNullOrWhiteSpace(candidate))
             {
                 return false;
             }
 
+            string prepared = StripJsonCodeFences(candidate).Trim();
+            if (!LooksLikeJsonStart(prepared))
+            {
+                return false;
+            }
+
+            if (TryParseJsonText(prepared, out jsonDocument, out normalizedJson))
+            {
+                return true;
+            }
+
+            if (TrySynthesizeJsonCandidate(prepared, out string synthesized)
+                && !string.Equals(synthesized, prepared, StringComparison.Ordinal)
+                && TryParseJsonText(synthesized, out jsonDocument, out normalizedJson))
+            {
+                return true;
+            }
+
+            string repaired = RepairJsonText(prepared);
+            if (!string.Equals(repaired, prepared, StringComparison.Ordinal)
+                && TryParseJsonText(repaired, out jsonDocument, out normalizedJson))
+            {
+                return true;
+            }
+
+            if (TrySynthesizeJsonCandidate(repaired, out string repairedSynthesized)
+                && !string.Equals(repairedSynthesized, repaired, StringComparison.Ordinal)
+                && TryParseJsonText(repairedSynthesized, out jsonDocument, out normalizedJson))
+            {
+                return true;
+            }
+
+            if (TryExtractGeometryJsonCandidate(prepared, out string extractedGeometry)
+                && TryParseJsonText(extractedGeometry, out jsonDocument, out normalizedJson))
+            {
+                return true;
+            }
+
+            if (!string.Equals(repaired, prepared, StringComparison.Ordinal)
+                && TryExtractGeometryJsonCandidate(repaired, out string repairedGeometry)
+                && TryParseJsonText(repairedGeometry, out jsonDocument, out normalizedJson))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryParseJsonText(string text, out JsonDocument? jsonDocument, out string normalizedJson)
+        {
+            jsonDocument = null;
+            normalizedJson = string.Empty;
+
             try
             {
-                using var jsonDoc = JsonDocument.Parse(trimmed);
-                formattedJson = JsonSerializer.Serialize(jsonDoc.RootElement, new JsonSerializerOptions
+                jsonDocument = JsonDocument.Parse(text, new JsonDocumentOptions { AllowTrailingCommas = true });
+                normalizedJson = JsonSerializer.Serialize(jsonDocument.RootElement, new JsonSerializerOptions
                 {
                     WriteIndented = true
                 });
@@ -264,8 +349,544 @@ namespace SharpestLlmStudio.Shared
             }
             catch
             {
+                jsonDocument?.Dispose();
+                jsonDocument = null;
+                normalizedJson = string.Empty;
                 return false;
             }
+        }
+
+        private static IEnumerable<string> EnumerateJsonCandidatesRelaxed(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                yield break;
+            }
+
+            string trimmed = text.Trim();
+            if (!string.IsNullOrWhiteSpace(trimmed))
+            {
+                yield return trimmed;
+            }
+
+            string withoutThinkBlocks = RemoveThinkBlocks(trimmed).Trim();
+            if (!string.IsNullOrWhiteSpace(withoutThinkBlocks) && !string.Equals(withoutThinkBlocks, trimmed, StringComparison.Ordinal))
+            {
+                yield return withoutThinkBlocks;
+            }
+
+            foreach (Match fenceMatch in JsonFenceRegex.Matches(withoutThinkBlocks))
+            {
+                string fencedContent = fenceMatch.Groups["content"].Value.Trim();
+                if (!string.IsNullOrWhiteSpace(fencedContent))
+                {
+                    yield return fencedContent;
+                }
+            }
+
+            string withoutFences = StripJsonCodeFences(withoutThinkBlocks).Trim();
+            if (!string.IsNullOrWhiteSpace(withoutFences) && !string.Equals(withoutFences, withoutThinkBlocks, StringComparison.Ordinal))
+            {
+                yield return withoutFences;
+            }
+
+            string sanitizedMarkup = SanitizeJsonCarrierText(withoutFences).Trim();
+            if (!string.IsNullOrWhiteSpace(sanitizedMarkup)
+                && !string.Equals(sanitizedMarkup, withoutFences, StringComparison.Ordinal)
+                && !string.Equals(sanitizedMarkup, trimmed, StringComparison.Ordinal))
+            {
+                yield return sanitizedMarkup;
+            }
+
+            if (TryExtractJsonSubstring(withoutFences, out string? extracted)
+                && !string.IsNullOrWhiteSpace(extracted)
+                && !string.Equals(extracted, trimmed, StringComparison.Ordinal)
+                && !string.Equals(extracted, withoutFences, StringComparison.Ordinal))
+            {
+                yield return extracted;
+            }
+
+            if (TryExtractJsonSubstring(sanitizedMarkup, out string? sanitizedExtracted)
+                && !string.IsNullOrWhiteSpace(sanitizedExtracted)
+                && !string.Equals(sanitizedExtracted, sanitizedMarkup, StringComparison.Ordinal)
+                && !string.Equals(sanitizedExtracted, withoutFences, StringComparison.Ordinal))
+            {
+                yield return sanitizedExtracted;
+            }
+        }
+
+        private static string StripJsonCodeFences(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            string trimmed = text.Trim();
+            if (!trimmed.StartsWith("```", StringComparison.Ordinal))
+            {
+                return trimmed;
+            }
+
+            int firstLineEnd = trimmed.IndexOf('\n');
+            if (firstLineEnd < 0)
+            {
+                return trimmed.Trim('`').Trim();
+            }
+
+            string firstLine = trimmed[..firstLineEnd].Trim();
+            if (!firstLine.StartsWith("```", StringComparison.Ordinal))
+            {
+                return trimmed;
+            }
+
+            int lastFenceStart = trimmed.LastIndexOf("```", StringComparison.Ordinal);
+            if (lastFenceStart <= firstLineEnd)
+            {
+                return trimmed[(firstLineEnd + 1)..].Trim();
+            }
+
+            return trimmed[(firstLineEnd + 1)..lastFenceStart].Trim();
+        }
+
+        private static string RemoveThinkBlocks(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            var sb = new StringBuilder();
+            int pos = 0;
+
+            while (pos < text.Length)
+            {
+                Match openMatch = ThinkOpenTagRegex.Match(text, pos);
+                if (!openMatch.Success)
+                {
+                    sb.Append(text[pos..]);
+                    break;
+                }
+
+                if (openMatch.Index > pos)
+                {
+                    sb.Append(text, pos, openMatch.Index - pos);
+                }
+
+                Match closeMatch = ThinkCloseTagRegex.Match(text, openMatch.Index + openMatch.Length);
+                pos = closeMatch.Success ? closeMatch.Index + closeMatch.Length : text.Length;
+            }
+
+            return sb.ToString();
+        }
+
+        private static string SanitizeJsonCarrierText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            string cleaned = RemoveThinkBlocks(text);
+            cleaned = JsonFenceRegex.Replace(cleaned, m => m.Groups["content"].Value);
+            cleaned = HtmlTagRegex.Replace(cleaned, " ");
+            cleaned = MarkdownQuoteRegex.Replace(cleaned, string.Empty);
+            cleaned = cleaned.Replace("&quot;", "\"").Replace("&apos;", "'").Replace("&lt;", "<").Replace("&gt;", ">").Replace("&amp;", "&");
+            return cleaned.Trim();
+        }
+
+        private static bool TryExtractJsonSubstring(string text, out string? candidate)
+        {
+            candidate = null;
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            int start = -1;
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (text[i] is '{' or '[')
+                {
+                    start = i;
+                    break;
+                }
+            }
+
+            if (start < 0)
+            {
+                return false;
+            }
+
+            int end = text.Length - 1;
+            while (end > start && char.IsWhiteSpace(text[end]))
+            {
+                end--;
+            }
+
+            while (end > start && text[end] is not '}' and not ']')
+            {
+                end--;
+            }
+
+            if (end <= start)
+            {
+                candidate = text[start..].Trim();
+                return !string.IsNullOrWhiteSpace(candidate);
+            }
+
+            candidate = text[start..(end + 1)].Trim();
+            return !string.IsNullOrWhiteSpace(candidate);
+        }
+
+        private static bool LooksLikeJsonStart(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            char first = text.TrimStart()[0];
+            return first is '{' or '[';
+        }
+
+        private static string RepairJsonText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            text = SanitizeJsonCarrierText(text);
+            text = NormalizeCommonJsonMistakes(text);
+
+            var sb = new StringBuilder(text.Length + 16);
+            var closers = new Stack<char>();
+            bool inString = false;
+            bool escaping = false;
+            char lastSignificant = '\0';
+
+            for (int i = 0; i < text.Length; i++)
+            {
+                char current = text[i];
+                if (inString)
+                {
+                    sb.Append(current);
+                    if (escaping)
+                    {
+                        escaping = false;
+                    }
+                    else if (current == '\\')
+                    {
+                        escaping = true;
+                    }
+                    else if (current == '"')
+                    {
+                        inString = false;
+                        lastSignificant = '"';
+                    }
+
+                    continue;
+                }
+
+                if (current == '"')
+                {
+                    if (ShouldInsertComma(lastSignificant, current))
+                    {
+                        sb.Append(',');
+                        lastSignificant = ',';
+                    }
+
+                    sb.Append(current);
+                    inString = true;
+                    continue;
+                }
+
+                if (char.IsWhiteSpace(current))
+                {
+                    sb.Append(current);
+                    continue;
+                }
+
+                if (current is '{' or '[')
+                {
+                    if (ShouldInsertComma(lastSignificant, current))
+                    {
+                        sb.Append(',');
+                        lastSignificant = ',';
+                    }
+
+                    closers.Push(current == '{' ? '}' : ']');
+                    sb.Append(current);
+                    lastSignificant = current;
+                    continue;
+                }
+
+                if (current is '}' or ']')
+                {
+                    while (closers.Count > 0 && closers.Peek() != current)
+                    {
+                        char autoClosed = closers.Pop();
+                        if (lastSignificant is not ':' and not ',' and not '{' and not '[')
+                        {
+                            sb.Append(autoClosed);
+                            lastSignificant = autoClosed;
+                        }
+                    }
+
+                    if (closers.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    closers.Pop();
+                    sb.Append(current);
+                    lastSignificant = current;
+                    continue;
+                }
+
+                if (ShouldInsertComma(lastSignificant, current))
+                {
+                    sb.Append(',');
+                    lastSignificant = ',';
+                }
+
+                sb.Append(current);
+                if (!char.IsWhiteSpace(current))
+                {
+                    lastSignificant = current;
+                }
+            }
+
+            if (inString)
+            {
+                sb.Append('"');
+            }
+
+            while (closers.Count > 0)
+            {
+                char closer = closers.Pop();
+                if (lastSignificant is ':' or ',')
+                {
+                    break;
+                }
+
+                sb.Append(closer);
+                lastSignificant = closer;
+            }
+
+            return sb.ToString().Trim();
+        }
+
+        private static bool TrySynthesizeJsonCandidate(string text, out string synthesized)
+        {
+            synthesized = string.Empty;
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            string cleaned = SanitizeJsonCarrierText(text).Trim();
+            if (string.IsNullOrWhiteSpace(cleaned))
+            {
+                return false;
+            }
+
+            List<string> objectFragments = ExtractTopLevelObjectFragments(cleaned);
+            if (objectFragments.Count >= 2)
+            {
+                synthesized = "[\n" + string.Join(",\n", objectFragments.Select(RepairJsonText)) + "\n]";
+                return true;
+            }
+
+            if (objectFragments.Count == 1 && StartsWithArrayLikeWrapper(cleaned))
+            {
+                synthesized = "[\n" + RepairJsonText(objectFragments[0]) + "\n]";
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryExtractGeometryJsonCandidate(string text, out string synthesized)
+        {
+            synthesized = string.Empty;
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            string cleaned = SanitizeJsonCarrierText(text);
+            var items = new List<string>();
+
+            foreach (Match match in Point2dRegex.Matches(cleaned))
+            {
+                if (TryParseRelaxedNumber(match.Groups["x"].Value, out double x)
+                    && TryParseRelaxedNumber(match.Groups["y"].Value, out double y))
+                {
+                    items.Add($"{{\"point_2d\":[{FormatJsonNumber(x)},{FormatJsonNumber(y)}]}}");
+                }
+            }
+
+            foreach (Match match in Bbox2dRegex.Matches(cleaned))
+            {
+                if (TryParseRelaxedNumber(match.Groups["x1"].Value, out double x1)
+                    && TryParseRelaxedNumber(match.Groups["y1"].Value, out double y1)
+                    && TryParseRelaxedNumber(match.Groups["x2"].Value, out double x2)
+                    && TryParseRelaxedNumber(match.Groups["y2"].Value, out double y2))
+                {
+                    items.Add($"{{\"bbox_2d\":[{FormatJsonNumber(x1)},{FormatJsonNumber(y1)},{FormatJsonNumber(x2)},{FormatJsonNumber(y2)}]}}");
+                }
+            }
+
+            if (items.Count == 0)
+            {
+                return false;
+            }
+
+            synthesized = "[\n" + string.Join(",\n", items) + "\n]";
+            return true;
+        }
+
+        private static bool TryParseRelaxedNumber(string text, out double value)
+        {
+            value = 0;
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            string normalized = text.Trim().Replace(',', '.');
+            return double.TryParse(normalized, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out value);
+        }
+
+        private static string FormatJsonNumber(double value)
+        {
+            return value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        private static bool StartsWithArrayLikeWrapper(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            char first = text.TrimStart()[0];
+            return first == '[' || first == '{';
+        }
+
+        private static List<string> ExtractTopLevelObjectFragments(string text)
+        {
+            var fragments = new List<string>();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return fragments;
+            }
+
+            int depth = 0;
+            int start = -1;
+            bool inString = false;
+            bool escaping = false;
+
+            for (int i = 0; i < text.Length; i++)
+            {
+                char current = text[i];
+
+                if (inString)
+                {
+                    if (escaping)
+                    {
+                        escaping = false;
+                    }
+                    else if (current == '\\')
+                    {
+                        escaping = true;
+                    }
+                    else if (current == '"')
+                    {
+                        inString = false;
+                    }
+
+                    continue;
+                }
+
+                if (current == '"')
+                {
+                    inString = true;
+                    continue;
+                }
+
+                if (current == '{')
+                {
+                    if (depth == 0)
+                    {
+                        start = i;
+                    }
+
+                    depth++;
+                    continue;
+                }
+
+                if (current == '}' && depth > 0)
+                {
+                    depth--;
+                    if (depth == 0 && start >= 0)
+                    {
+                        string fragment = text[start..(i + 1)].Trim();
+                        if (!string.IsNullOrWhiteSpace(fragment))
+                        {
+                            fragments.Add(fragment);
+                        }
+
+                        start = -1;
+                    }
+                }
+            }
+
+            if (depth > 0 && start >= 0)
+            {
+                string fragment = RepairJsonText(text[start..].Trim());
+                if (!string.IsNullOrWhiteSpace(fragment))
+                {
+                    fragments.Add(fragment);
+                }
+            }
+
+            return fragments;
+        }
+
+        private static string NormalizeCommonJsonMistakes(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            string normalized = text.Trim();
+            normalized = JsonPropertyNameRegex.Replace(normalized, m => $"{m.Groups[1].Value}\"{m.Groups["name"].Value.Trim()}\"{m.Groups[3].Value}:");
+            normalized = JsonArrayStartLineRegex.Replace(normalized, "[");
+            normalized = JsonObjectStartLineRegex.Replace(normalized, "{");
+            normalized = normalized.Replace("\r\n", "\n");
+            normalized = normalized.Replace("}\n{", "},\n{");
+            normalized = normalized.Replace("]\n[", "],\n[");
+            normalized = normalized.Replace("}\n\"", "},\n\"");
+            normalized = normalized.Replace("\"\n\"", "\",\n\"");
+            normalized = TrailingCommaBeforeCloserRegex.Replace(normalized, string.Empty);
+            normalized = MultiCommaRegex.Replace(normalized, ", ");
+            return normalized;
+        }
+
+        private static bool ShouldInsertComma(char lastSignificant, char current)
+        {
+            if (lastSignificant == '\0' || lastSignificant is '{' or '[' or ':' or ',')
+            {
+                return false;
+            }
+
+            return current is '{' or '[' or '"' or '-'
+                || char.IsDigit(current)
+                || current is 't' or 'f' or 'n';
         }
 
         public static string RenderMarkdownOrJson(string text)

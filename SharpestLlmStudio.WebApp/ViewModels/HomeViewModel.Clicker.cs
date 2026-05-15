@@ -2005,21 +2005,17 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             normalizedJson = string.Empty;
             errorMessage = string.Empty;
 
-            foreach (string candidate in EnumerateJsonCandidates(responseText))
+            if (StaticLogics.TryParseJsonDocumentRelaxed(responseText, out JsonDocument? document, out string relaxedNormalizedJson))
             {
-                try
+                using (document)
                 {
-                    using var document = JsonDocument.Parse(candidate, new JsonDocumentOptions { AllowTrailingCommas = true });
-                    normalizedJson = JsonSerializer.Serialize(document.RootElement, new JsonSerializerOptions { WriteIndented = true });
                     if (TryExtractClickerPlanSteps(document.RootElement, window, includeWindowChrome, out List<ClickerPlanStep>? extractedSteps) && extractedSteps != null && extractedSteps.Count > 0)
                     {
+                        normalizedJson = relaxedNormalizedJson;
                         _ = StaticLogger.LogAsync($"[Clicker] TryParseClickerPlan: parsed {extractedSteps.Count} step(s) from JSON candidate.");
                         steps = extractedSteps;
                         return true;
                     }
-                }
-                catch
-                {
                 }
             }
 
@@ -2040,22 +2036,18 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         {
             question = null;
 
-            foreach (string candidate in EnumerateJsonCandidates(responseText))
+            if (StaticLogics.TryParseJsonDocumentRelaxed(responseText, out JsonDocument? document, out string normalizedJson))
             {
-                try
+                using (document)
                 {
-                    using var document = JsonDocument.Parse(candidate, new JsonDocumentOptions { AllowTrailingCommas = true });
                     if (TryExtractClickerUserQuestion(document.RootElement, out question) && question != null)
                     {
                         question = question with
                         {
-                            NormalizedJson = JsonSerializer.Serialize(document.RootElement, new JsonSerializerOptions { WriteIndented = true })
+                            NormalizedJson = normalizedJson
                         };
                         return true;
                     }
-                }
-                catch
-                {
                 }
             }
 
@@ -2454,24 +2446,6 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             }
 
             return false;
-        }
-
-        private static IEnumerable<string> EnumerateJsonCandidates(string text)
-        {
-            if (string.IsNullOrWhiteSpace(text))
-            {
-                yield break;
-            }
-
-            string trimmed = text.Trim();
-            yield return trimmed;
-
-            int firstBrace = trimmed.IndexOf('{');
-            int lastBrace = trimmed.LastIndexOf('}');
-            if (firstBrace >= 0 && lastBrace > firstBrace)
-            {
-                yield return trimmed[firstBrace..(lastBrace + 1)];
-            }
         }
 
         private sealed record ClickerPlanStep(
