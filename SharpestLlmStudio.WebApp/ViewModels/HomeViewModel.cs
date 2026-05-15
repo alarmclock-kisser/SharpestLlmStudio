@@ -29,6 +29,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         private CancellationTokenSource? generationCts;
         private ElementReference messageContainerRef;
         private long _lastLlamaCppProgressUiTick;
+        private bool pendingAutoCreateContextAfterFirstResponse;
 
         public void RegisterStateChangeListener(Action listener)
         {
@@ -409,12 +410,12 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public int ContextSize { get; set; } = 1024;
         public bool UseMmproj { get; set; } = true;
         public bool UseFlashAttention { get; set; } = true;
-        public bool NoWarmup { get; set; } = false;
+        public bool NoWarmup { get; set; } = true;
         public bool UseSystemPrompt { get; set; } = true;
         public bool IsolatedGeneration { get; set; } = false;
         public bool AutoSaveEnabled { get; set; } = true;
         // Use 0 to disable downsizing (send full-size images). Default 720.
-        public int ImageMaxDimension { get; set; } = 720;
+        public int ImageMaxDimension { get; set; } = 0;
 
         private bool useJsonOutputFormat;
         public bool UseJsonOutputFormat
@@ -1658,6 +1659,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         {
             this.Client.ResetConversation();
             GenerationStats.ResetAccumulatedTotals();
+            this.pendingAutoCreateContextAfterFirstResponse = false;
 
             bool serverContextCleared = await this.Client.ClearServerContextAsync();
             if (!serverContextCleared && this.IsLoaded)
@@ -2114,6 +2116,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
 
                 bool expectedJsonOutput = this.UseJsonOutputFormat && this.HasJsonOutputFormat;
                 bool receivedValidJsonOutput = StaticLogics.TryFormatJson(assistantText, out _);
+
+                await this.TryAutoCreateContextAfterFirstResponseAsync(assistantText);
 
                 if (expectedJsonOutput && !receivedValidJsonOutput)
                 {
@@ -2739,6 +2743,40 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             return string.IsNullOrWhiteSpace(name) ? "session" : name;
         }
 
+        private static string CreateAutomaticContextSaveName()
+        {
+            return $"context_{DateTime.Now:yyyyMMdd_HHmmss_fff}";
+        }
+
+        private async Task TryAutoCreateContextAfterFirstResponseAsync(string assistantText)
+        {
+            if (!this.pendingAutoCreateContextAfterFirstResponse
+                || this.IsolatedGeneration
+                || !this.IsLoaded
+                || !string.IsNullOrWhiteSpace(this.SelectedContextFilePath)
+                || string.IsNullOrWhiteSpace(assistantText))
+            {
+                return;
+            }
+
+            this.pendingAutoCreateContextAfterFirstResponse = false;
+
+            string saveName = CreateAutomaticContextSaveName();
+            LlamaContextSaveResult saveResult = await this.Client.SaveContextAsync(saveName);
+            if (!saveResult.Success)
+            {
+                this.IsCurrentContextSaved = false;
+                await StaticLogger.LogAsync($"[HomeViewModel] Automatic context creation failed: {saveResult.ErrorMessage ?? "Unknown error"}");
+                return;
+            }
+
+            this.ContextSaveName = saveName;
+            this.SelectedContextFilePath = saveResult.FilePath;
+            this.IsCurrentContextSaved = true;
+            await this.RefreshContextAsync();
+            await StaticLogger.LogAsync($"[HomeViewModel] Automatic context created: {Path.GetFileName(saveResult.FilePath)}");
+        }
+
         public async Task SaveContextAsync()
         {
             var result = await this.Client.SaveContextAsync(this.ContextSaveName);
@@ -2773,6 +2811,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             if (success)
             {
                 this.CollapseManagementPanels(collapseContext: true);
+                this.pendingAutoCreateContextAfterFirstResponse = false;
             }
 
             this.SyncChatMessagesFromClient();
@@ -3141,6 +3180,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.GeneratedOutput = string.Empty;
             this.ChatMessages = [];
             this.ResetKnowledgeBaseState();
+                    this.pendingAutoCreateContextAfterFirstResponse = false;
             this.IsCurrentContextSaved = false;
             this.SelectedContextFilePath = null;
             this.ContextSaveName = string.Empty;
@@ -4415,6 +4455,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                             this.RemoteConnectionStatus = $"Connected to {remoteResult.ProviderLabel}: {this.RemoteModelId}";
                             this.IsLoaded = true;
                             this.IsReusedInstance = false;
+                            this.pendingAutoCreateContextAfterFirstResponse = true;
                             this.LoadedModel = null;
                             this.IsModelPanelExpanded = true;
                             this.LastActionMessage = $"Remote provider connected: {remoteResult.ProviderLabel}";
@@ -4481,6 +4522,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                             : $"{sw.Elapsed.TotalSeconds:F3} sec. elapsed loading.";
                         this.IsLoaded = true;
                         this.IsReusedInstance = response.ReusedExistingInstance;
+                        this.pendingAutoCreateContextAfterFirstResponse = !response.ReusedExistingInstance;
                         this.LoadedModel = response.ReusedExistingInstance
                             ? (this.ResolveModelFromServerId(response.ActiveModelId) ?? modelToLoad)
                             : modelToLoad;
