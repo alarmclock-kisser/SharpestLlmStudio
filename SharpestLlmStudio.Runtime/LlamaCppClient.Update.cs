@@ -25,6 +25,7 @@ namespace SharpestLlmStudio.Runtime
         public DateTime? InstalledFileDateUtc { get; set; }
         public string LatestTag { get; set; } = string.Empty;
         public DateTime? LatestPublishedAtUtc { get; set; }
+        public string LatestReleaseNotes { get; set; } = string.Empty;
         public string MatchedAssetName { get; set; } = string.Empty;
         public string MatchedAssetDownloadUrl { get; set; } = string.Empty;
     }
@@ -110,6 +111,7 @@ namespace SharpestLlmStudio.Runtime
 
                 result.LatestTag = matchedRelease.TagName;
                 result.LatestPublishedAtUtc = matchedRelease.PublishedAtUtc;
+                result.LatestReleaseNotes = matchedRelease.Body;
                 result.MatchedAssetName = matchedAsset.Name;
                 result.MatchedAssetDownloadUrl = matchedAsset.DownloadUrl;
                 result.UpdateAvailable = IsNewerBuildAvailable(result);
@@ -468,6 +470,11 @@ namespace SharpestLlmStudio.Runtime
                     ? parsedPublished.ToUniversalTime()
                     : null;
 
+                string body = releaseElement.TryGetProperty("body", out JsonElement bodyElement)
+                    && bodyElement.ValueKind == JsonValueKind.String
+                    ? bodyElement.GetString() ?? string.Empty
+                    : string.Empty;
+
                 var assets = new List<GitHubAssetInfo>();
                 if (releaseElement.TryGetProperty("assets", out JsonElement assetsElement) && assetsElement.ValueKind == JsonValueKind.Array)
                 {
@@ -490,7 +497,7 @@ namespace SharpestLlmStudio.Runtime
                     }
                 }
 
-                releases.Add(new GitHubReleaseInfo(tagName, publishedAtUtc, assets));
+                releases.Add(new GitHubReleaseInfo(tagName, publishedAtUtc, body, assets));
             }
 
             return releases;
@@ -981,7 +988,7 @@ namespace SharpestLlmStudio.Runtime
             return $"{value:0.##} {units[unitIndex]}";
         }
 
-        private sealed record GitHubReleaseInfo(string TagName, DateTime? PublishedAtUtc, List<GitHubAssetInfo> Assets);
+        private sealed record GitHubReleaseInfo(string TagName, DateTime? PublishedAtUtc, string Body, List<GitHubAssetInfo> Assets);
         private sealed record GitHubAssetInfo(string Name, string DownloadUrl, long Size);
         private sealed record CopiedFileState(string TargetPath, string BackupPath, bool HadOriginal);
     }

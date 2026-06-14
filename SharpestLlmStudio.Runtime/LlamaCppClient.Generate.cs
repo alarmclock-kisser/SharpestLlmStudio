@@ -491,9 +491,10 @@ namespace SharpestLlmStudio.Runtime
         /// This bypasses the Jinja template rendering in <c>/v1/chat/completions</c> which fails
         /// with "Failed to parse input" when base64 data URLs are embedded in multimodal content arrays.
         /// </summary>
+
         private JsonObject BuildLocalCompletionPayload(LlamaGenerationRequest request, List<string> normalizedImages)
         {
-            // Build a ChatML-style prompt manually with [img-N] placeholders
+            // Build a ChatML-style prompt manually
             var sb = new StringBuilder();
 
             if (!string.IsNullOrWhiteSpace(request.SystemPrompt))
@@ -517,32 +518,32 @@ namespace SharpestLlmStudio.Runtime
             }
 
             sb.Append("<|im_start|>user\n");
+
+            // 1. Image Placeholders injizieren
             for (int i = 0; i < normalizedImages.Count; i++)
             {
                 sb.Append($"[img-{i + 1}]");
             }
+
+            // 2. WICHTIG: Audio Placeholders injizieren (fehlte vorher!)
+            if (request.Audios != null)
+            {
+                for (int i = 0; i < request.Audios.Length; i++)
+                {
+                    sb.Append($"[aud-{i + 1}]");
+                }
+            }
+
             sb.Append(request.Prompt);
             sb.Append("<|im_end|>\n");
             sb.Append("<|im_start|>assistant\n");
 
-            // Extract raw base64 from data URLs and build image_data array
-            var imageDataArray = new JsonArray();
-            for (int i = 0; i < normalizedImages.Count; i++)
-            {
-                string raw = normalizedImages[i];
-                int commaIdx = raw.IndexOf(',');
-                string base64 = (commaIdx >= 0) ? raw[(commaIdx + 1)..] : raw;
-                imageDataArray.Add(new JsonObject
-                {
-                    ["data"] = base64,
-                    ["id"] = i + 1
-                });
-            }
-
+            // Payload zusammenbauen und saubere Hilfsmethode für Base64 nutzen
             var payload = new JsonObject
             {
                 ["prompt"] = sb.ToString(),
-                ["image_data"] = imageDataArray,
+                ["image_data"] = ExtractMediaData(normalizedImages),
+                ["audio_data"] = ExtractMediaData(request.Audios),
                 ["stream"] = request.Stream,
                 ["temperature"] = request.Temperature,
                 ["top_p"] = request.TopP,
@@ -560,6 +561,7 @@ namespace SharpestLlmStudio.Runtime
                 payload["repeat_penalty"] = request.RepetitionPenalty;
             }
 
+            // Stop Sequences sauber verarbeiten
             if (request.StopSequences is { Length: > 0 })
             {
                 var stop = new JsonArray();
@@ -580,17 +582,39 @@ namespace SharpestLlmStudio.Runtime
             }
             else if (payload["stop"] is JsonArray existingStop)
             {
-                bool hasImEnd = false;
-                foreach (var item in existingStop)
-                {
-                    if (item?.GetValue<string>() == "<|im_end|>") { hasImEnd = true; break; }
-                }
+                bool hasImEnd = existingStop.Any(item => item?.GetValue<string>() == "<|im_end|>");
                 if (!hasImEnd) existingStop.Add("<|im_end|>");
             }
 
             return payload;
         }
 
+        /// <summary>
+        /// Hilfsmethode nach Clean Code Prinzipien, um den Data-URL-Header abzuschneiden 
+        /// und das llama.cpp kompatible ID/Data-Format zu erzeugen.
+        /// </summary>
+        private JsonArray ExtractMediaData(IEnumerable<string>? mediaItems)
+        {
+            var dataArray = new JsonArray();
+            if (mediaItems == null) return dataArray;
+
+            int currentId = 1;
+            foreach (var rawItem in mediaItems)
+            {
+                if (string.IsNullOrWhiteSpace(rawItem)) continue;
+
+                int commaIdx = rawItem.IndexOf(',');
+                string base64 = (commaIdx >= 0) ? rawItem[(commaIdx + 1)..] : rawItem;
+
+                dataArray.Add(new JsonObject
+                {
+                    ["data"] = base64,
+                    ["id"] = currentId++
+                });
+            }
+
+            return dataArray;
+        }
         private async Task<string> GenerateLocalCompletionAsync(JsonObject payload, CancellationToken cancellationToken)
         {
             string url = $"{this.CurrentBaseUrl}/completion";

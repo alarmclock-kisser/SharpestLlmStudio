@@ -533,6 +533,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             .ToList();
         public string? SelectedWhisperModelName { get; set; }
         public bool IsWhisperLoaded => this.Whisper.IsLoaded;
+        public bool IsGemmaDenseWithMmprojAudio => this.IsLoaded && this.LoadedModel != null && this.LoadedModel.Name.Contains("gemma-4-e", StringComparison.OrdinalIgnoreCase) && this.UseMmproj;
         public bool IsWhisperTranscribing => this.Whisper.IsTranscribing;
         public bool IsWhisperLiveMode => this.Whisper.IsLiveMode;
         public bool IsMicRecording { get; private set; }
@@ -863,6 +864,8 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public string LlamaCppCudaRuntimeStatusText { get; private set; } = string.Empty;
         public string LlamaCppUpdatePopupTitle { get; private set; } = "llama.cpp Update";
         public string LlamaCppUpdatePopupMessage { get; private set; } = string.Empty;
+        public string LlamaCppUpdatePopupReleaseNotes { get; private set; } = string.Empty;
+        public string RenderedLlamaCppUpdatePopupReleaseNotes => StaticLogics.RenderGitHubReleaseNotes(this.LlamaCppUpdatePopupReleaseNotes);
         public string LlamaCppResolvedExecutablePath { get; private set; } = string.Empty;
         public string LlamaCppDetectedBackendText { get; private set; } = "Backend: unknown";
         public bool LlamaCppHasCudaRuntimeBinaries { get; private set; }
@@ -918,6 +921,9 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 this.LlamaCppLatestBuildText = !string.IsNullOrWhiteSpace(result.LatestTag)
                     ? $"Latest build: {result.LatestTag}{(result.LatestPublishedAtUtc.HasValue ? $" ({result.LatestPublishedAtUtc.Value.ToLocalTime():yyyy-MM-dd HH:mm})" : string.Empty)}"
                     : "Latest build: not found";
+                this.LlamaCppUpdatePopupReleaseNotes = result.UpdateAvailable
+                    ? result.LatestReleaseNotes?.Trim() ?? string.Empty
+                    : string.Empty;
 
                 if (this.HasLlamaCppUpdateAvailable)
                 {
@@ -937,6 +943,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 this.LlamaCppUpdateStatusText = $"Update check failed: {ex.Message}";
                 this.LlamaCppUpdatePopupTitle = "llama.cpp Update Error";
                 this.LlamaCppUpdatePopupMessage = this.LlamaCppUpdateStatusText;
+                this.LlamaCppUpdatePopupReleaseNotes = string.Empty;
                 this.ShowLlamaCppUpdatePopup = true;
                 await StaticLogger.LogAsync(ex, "[HomeViewModel] llama.cpp update check failed");
             }
@@ -958,6 +965,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 this.LlamaCppUpdatePopupTitle = "CUDA Runtime Binaries";
                 this.LlamaCppUpdatePopupMessage = "Unload the local model before refreshing CUDA runtime binaries.";
+                this.LlamaCppUpdatePopupReleaseNotes = string.Empty;
                 this.ShowLlamaCppUpdatePopup = true;
                 this.RequestUiRefresh();
                 return;
@@ -971,6 +979,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.ShowLlamaCppUpdatePopup = true;
             this.LlamaCppUpdatePopupTitle = "Refreshing CUDA Runtime Binaries";
             this.LlamaCppUpdatePopupMessage = "Preparing CUDA runtime refresh...";
+            this.LlamaCppUpdatePopupReleaseNotes = string.Empty;
             this.LlamaCppUpdateProgressPercent = 0;
             this.LlamaCppUpdateProgressText = "Preparing CUDA runtime refresh...";
             this.RequestUiRefresh();
@@ -1035,6 +1044,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 this.LlamaCppUpdatePopupTitle = "llama.cpp Update";
                 this.LlamaCppUpdatePopupMessage = "Unload the local model before updating llama.cpp binaries.";
+                this.LlamaCppUpdatePopupReleaseNotes = string.Empty;
                 this.ShowLlamaCppUpdatePopup = true;
                 this.RequestUiRefresh();
                 return;
@@ -1048,6 +1058,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             this.ShowLlamaCppUpdatePopup = true;
             this.LlamaCppUpdatePopupTitle = "Updating llama.cpp";
             this.LlamaCppUpdatePopupMessage = "Preparing update...";
+            this.LlamaCppUpdatePopupReleaseNotes = string.Empty;
             this.LlamaCppUpdateProgressPercent = 0;
             this.LlamaCppUpdateProgressText = "Preparing update...";
             this.RequestUiRefresh();
@@ -1081,6 +1092,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 this.LlamaCppUpdatePopupTitle = "llama.cpp Update";
                 this.LlamaCppUpdatePopupMessage = "llama.cpp update canceled.";
+                this.LlamaCppUpdatePopupReleaseNotes = string.Empty;
                 this.LlamaCppUpdateStatusText = this.LlamaCppUpdatePopupMessage;
                 this.LastActionMessage = this.LlamaCppUpdatePopupMessage;
             }
@@ -1088,6 +1100,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
             {
                 this.LlamaCppUpdatePopupTitle = "llama.cpp Update Error";
                 this.LlamaCppUpdatePopupMessage = $"llama.cpp update failed: {ex.Message}";
+                this.LlamaCppUpdatePopupReleaseNotes = string.Empty;
                 this.LlamaCppUpdateStatusText = this.LlamaCppUpdatePopupMessage;
                 this.LastActionMessage = this.LlamaCppUpdatePopupMessage;
                 await StaticLogger.LogAsync(ex, "[HomeViewModel] llama.cpp update failed");
@@ -2064,12 +2077,13 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                 {
                     Prompt = promptForGeneration,
                     Images = this.SelectedImagePaths.ToArray(),
+                    Audios = this.Base64Audio != null ? new[] { this.Base64Audio } : Array.Empty<string>(),
                     Isolated = this.IsolatedGeneration,
                     PersistConversation = !this.IsolatedGeneration,
                     IncludeConversationHistory = !this.IsolatedGeneration,
                     MaxTokens = this.GenMaxTokens,
                     Temperature = this.GenTemperature,
-                    RepetitionPenalty = (double)this.GenRepetitionPenalty,
+                    RepetitionPenalty = (double) this.GenRepetitionPenalty,
                     TopP = this.GenTopP,
                     TopK = this.GenTopK,
                     // Pass image prefs from UI into the generation request
@@ -2284,13 +2298,36 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         [JSInvokable]
         public async Task OnMicClick()
         {
-            if (this.IsMicRecording)
+            if (this.LoadedModel == null || this.IsBusy)
             {
-                await this.StopMicAndTranscribeAsync();
+                return;
+            }
+
+            // Check if loaded model is gemma-4e2b or e4b or 12b
+            if (this.LoadedModel.IsOmni || this.LoadedModel.Name.Contains("gemma-4e2b", StringComparison.OrdinalIgnoreCase) ||
+                this.LoadedModel.Name.Contains("gemma-e4b", StringComparison.OrdinalIgnoreCase) ||
+                this.LoadedModel.Name.Contains("gemma-12b", StringComparison.OrdinalIgnoreCase))
+            {
+                if (this.IsMicRecording)
+                {
+                    await this.StopRecordAudioForModelAsync();
+                }
+                else
+                {
+                    await this.StartRecordAudioForModelAsync();
+                }
             }
             else
             {
-                await this.StartMicRecordingAsync();
+                if (this.IsMicRecording)
+                {
+
+                    await this.StopMicAndTranscribeAsync();
+                }
+                else
+                {
+                    await this.StartMicRecordingAsync();
+                }
             }
         }
 
@@ -2356,6 +2393,42 @@ namespace SharpestLlmStudio.WebApp.ViewModels
                     this.LastActionMessage = "No Whisper model loaded. Recording discarded.";
                 }
             }
+            this.RequestUiRefresh();
+        }
+
+        private async Task StartRecordAudioForModelAsync()
+        {
+            if (this.LoadedModel == null || this.IsBusy)
+            {
+                return;
+            }
+
+            this.LastActionMessage = "Recording audio for model input...";
+            this.IsMicRecording = true;
+            this.RequestUiRefresh();
+
+
+            // Record at Whisper-native format (16 kHz, 16 bit, mono)
+            var audio = await this.Whisper.Audio.RecordAudioAsync(
+                sampleRate: OnnxWhisperService.WhisperSampleRate,
+                bitDepth: 16,
+                channels: OnnxWhisperService.WhisperChannels,
+                onLevel: this.UpdateMicLevel);
+
+            if (audio == null || audio.Data.Length <= 0)
+            {
+                await StaticLogger.LogAsync("[HomeViewModel] No audio data captured from recording.");
+                return;
+            }
+
+            this.Base64Audio = await audio.SerializeAsBase64Async();
+        }
+
+        private async Task StopRecordAudioForModelAsync()
+        {
+            this.Whisper.Audio.StopRecording();
+            this.ResetMicLevel();
+            this.IsMicRecording = false;
             this.RequestUiRefresh();
         }
 
@@ -3827,6 +3900,7 @@ namespace SharpestLlmStudio.WebApp.ViewModels
         public string JsonRenderColor { get; set; } = "#ff0000";
         public int JsonRenderStrokeWidth { get; set; } = 3;
         public bool JsonRenderLabels { get; set; } = false;
+        public string? Base64Audio { get; private set; }
 
         public async Task BrowseJsonImageClickAsync()
         {

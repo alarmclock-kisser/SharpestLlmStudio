@@ -967,6 +967,14 @@ Example (pointer + keyboard):
                             <div class="llamacpp-update-progress-text">@VM.LlamaCppCudaRuntimeStatusText</div>
                         }
 
+                        @if (!string.IsNullOrWhiteSpace(VM.LlamaCppUpdatePopupReleaseNotes))
+                        {
+                            <div class="llamacpp-update-release-notes-section">
+                                <div class="llamacpp-update-release-notes-title">Release notes</div>
+                                <div class="llamacpp-update-release-notes-content chat-content">@((MarkupString)VM.RenderedLlamaCppUpdatePopupReleaseNotes)</div>
+                            </div>
+                        }
+
                         @if (VM.IsCheckingLlamaCppUpdate || VM.IsLlamaCppUpdateBusy || VM.LlamaCppUpdateProgressPercent > 0)
                         {
                             <div class="llamacpp-update-progress-inline popup-progress">
@@ -1246,7 +1254,7 @@ Example (pointer + keyboard):
                     <button id="micButton" type="button"
                             class="mic-btn @(VM.IsMicRecording ? "recording" : "") @(VM.IsWhisperTranscribing ? "transcribing" : "")"
                             style="@($"--mic-level:{VM.MicLevel:0.000};")"
-                            disabled="@(!VM.IsWhisperLoaded || VM.IsGenerating || VM.IsWhisperTranscribing)"
+                            disabled="@((!VM.IsWhisperLoaded && !VM.IsGemmaDenseWithMmprojAudio) || VM.IsGenerating || VM.IsWhisperTranscribing)"
                             title="@(VM.IsMicRecording ? "Recording... click or release to stop" : "Click or hold to record audio. Right-click to upload an audio file.")">
                         <span class="mic-level-fill" aria-hidden="true"></span>
                         <i class="rzi mic-btn-icon">@(VM.IsMicRecording ? "stop" : VM.IsWhisperTranscribing ? "hourglass_empty" : "mic")</i>
@@ -1256,7 +1264,7 @@ Example (pointer + keyboard):
                                   Icon="@(VM.IsWhisperLiveMode ? "hearing_disabled" : "hearing")"
                                   ButtonStyle="@(VM.IsWhisperLiveMode ? ButtonStyle.Danger : ButtonStyle.Light)"
                                   Click="VM.ToggleLiveModeAsync"
-                                  Disabled="@(!VM.IsWhisperLoaded || VM.IsGenerating || VM.IsMicRecording)" />
+                                  Disabled="@((!VM.IsWhisperLoaded && !VM.IsGemmaDenseWithMmprojAudio) || VM.IsGenerating || VM.IsMicRecording)" />
 
                     <RadzenButton Text="@(VM.UseWebChatProvider ? "Send to Web Chat" : "Generate")" Icon="send" ButtonStyle="ButtonStyle.Primary" Disabled="@(!VM.CanSend || (!VM.UseWebChatProvider && !VM.IsLoaded) || VM.IsBusy)" Click="@VM.StartGenerationAsync" />
                     @if (VM.UseWebChatProvider)

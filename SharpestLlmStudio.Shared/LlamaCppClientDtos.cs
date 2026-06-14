@@ -18,6 +18,8 @@ namespace SharpestLlmStudio.Shared
         public int MaxWidthAndHeight { get; set; } = 720; // Set to 0 to disable downsizing and send full-size images
         public string ImageFormat { get; set; } = "jpg"; // Format to use when downsizing and serializing images. Supported: "jpg", "png", "bmp"
 
+        public string[]? Audios { get; set; }
+
         public bool Isolated { get; set; } = false;
         public bool PersistConversation { get; set; } = true;
         public bool IncludeConversationHistory { get; set; } = true;

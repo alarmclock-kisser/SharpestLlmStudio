@@ -337,9 +337,10 @@
 }
 
 .llamacpp-update-popup-card {
-    width: min(760px, 100%);
-    max-height: min(80vh, 760px);
-    overflow: auto;
+    width: min(1100px, 96vw);
+    max-height: min(88vh, 920px);
+    display: flex;
+    flex-direction: column;
     border-radius: 12px;
     background: var(--rz-base-background-color, #fff);
     color: var(--rz-text-color, inherit);
@@ -361,11 +362,49 @@
     flex-direction: column;
     gap: 0.75rem;
     padding: 0 1rem 1rem;
+    overflow: hidden auto;
 }
 
 .llamacpp-update-popup-message {
     white-space: pre-wrap;
     word-break: break-word;
+}
+
+.llamacpp-update-release-notes-section {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    gap: 0.45rem;
+    flex: 1 1 auto;
+}
+
+.llamacpp-update-release-notes-title {
+    font-size: 0.88rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+
+.llamacpp-update-release-notes-content {
+    flex: 1 1 auto;
+    min-height: 14rem;
+    max-height: 42vh;
+    overflow: auto;
+    padding: 0.8rem 0.9rem;
+    border-radius: 0.6rem;
+    border: 1px solid var(--rz-base-300);
+    background: rgba(0, 0, 0, 0.03);
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    line-height: 1.4;
+}
+
+.llamacpp-update-release-notes-content.chat-content {
+    font-size: 0.9rem;
+}
+
+.llamacpp-update-release-notes-content.chat-content ::deep .md-h:first-child {
+    margin-top: 0;
 }
 
 .llamacpp-update-popup-path {

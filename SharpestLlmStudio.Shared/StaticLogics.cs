@@ -29,6 +29,10 @@ namespace SharpestLlmStudio.Shared
         private static readonly Regex MultiCommaRegex = new(@",\s*,+", RegexOptions.Compiled);
         private static readonly Regex Point2dRegex = new(@"(?:""point_2d""|point_2d)\s*:\s*\[\s*(?<x>-?\d+(?:[\.,]\d+)?)\s*,\s*(?<y>-?\d+(?:[\.,]\d+)?)\s*\]", RegexOptions.IgnoreCase | RegexOptions.Compiled);
         private static readonly Regex Bbox2dRegex = new(@"(?:""bbox_2d""|bbox_2d)\s*:\s*\[\s*(?<x1>-?\d+(?:[\.,]\d+)?)\s*,\s*(?<y1>-?\d+(?:[\.,]\d+)?)\s*,\s*(?<x2>-?\d+(?:[\.,]\d+)?)\s*,\s*(?<y2>-?\d+(?:[\.,]\d+)?)\s*\]", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex MarkdownLinkRegex = new(@"\[([^\]]+)\]\((https?://[^\s)]+)\)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex ReleaseNotesDetailsRegex = new(@"<details\b[^>]*>(?<content>[\s\S]*?)</details>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex ReleaseNotesSummaryRegex = new(@"<summary\b[^>]*>(?<content>[\s\S]*?)</summary>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static readonly Regex ReleaseNotesBreakRegex = new(@"<br\s*/?>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
 
 
@@ -899,6 +903,67 @@ namespace SharpestLlmStudio.Shared
             return RenderWithThinkBlocks(text);
         }
 
+        public static string RenderGitHubReleaseNotes(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return string.Empty;
+            }
+
+            string normalized = NormalizeGitHubReleaseNotes(text);
+            return RenderMarkdown(normalized);
+        }
+
+        private static string NormalizeGitHubReleaseNotes(string text)
+        {
+            string normalized = text.Replace("\r\n", "\n").Trim();
+            normalized = ReleaseNotesBreakRegex.Replace(normalized, "\n");
+            normalized = ReleaseNotesDetailsRegex.Replace(normalized, match =>
+            {
+                string content = match.Groups["content"].Value;
+                string summary = ReleaseNotesSummaryRegex.Match(content).Success
+                    ? ReleaseNotesSummaryRegex.Match(content).Groups["content"].Value
+                    : content;
+
+                summary = WebUtility.HtmlDecode(Regex.Replace(summary, "<[^>]+>", " ")).Trim();
+                if (string.IsNullOrWhiteSpace(summary))
+                {
+                    return "\n";
+                }
+
+                return $"\n## {summary}\n";
+            });
+
+            normalized = Regex.Replace(normalized, @"(?<!\n)(\*\*[^\n*]+:\*\*)", "\n$1");
+            normalized = Regex.Replace(normalized, @"\s+-\s+(?=\[)", "\n- ");
+            normalized = Regex.Replace(normalized, @"\)\s+-\s+(?=\[)", ")\n- ");
+            normalized = Regex.Replace(normalized, @"(?<!\n)(#{1,6}\s+)", "\n$1");
+            normalized = Regex.Replace(normalized, @"\n{3,}", "\n\n");
+
+            var lines = normalized.Split('\n');
+            var sb = new StringBuilder();
+
+            foreach (string rawLine in lines)
+            {
+                string line = rawLine.Trim();
+                if (line.Length == 0)
+                {
+                    sb.AppendLine();
+                    continue;
+                }
+
+                if (line.StartsWith("**", StringComparison.Ordinal) && line.EndsWith(":**", StringComparison.Ordinal))
+                {
+                    sb.Append("## ").AppendLine(line[2..^3].Trim());
+                    continue;
+                }
+
+                sb.AppendLine(WebUtility.HtmlDecode(line));
+            }
+
+            return sb.ToString().Trim();
+        }
+
         private static string RenderWithThinkBlocks(string text)
         {
             if (string.IsNullOrEmpty(text) || !ContainsThinkOpenTag(text))
@@ -1003,6 +1068,7 @@ namespace SharpestLlmStudio.Shared
         {
             var encoded = WebUtility.HtmlEncode(text);
             encoded = Regex.Replace(encoded, @"`([^`]+)`", "<code class=\"md-inline-code\">$1</code>");
+            encoded = MarkdownLinkRegex.Replace(encoded, "<a class=\"md-link\" href=\"$2\" target=\"_blank\" rel=\"noopener noreferrer\">$1</a>");
             encoded = Regex.Replace(encoded, @"\*\*(.+?)\*\*", "<strong>$1</strong>");
             encoded = Regex.Replace(encoded, @"\*(.+?)\*", "<em>$1</em>");
             encoded = Regex.Replace(encoded, "(?<![\"'>])(https?://[^\\s<]+)", "<a class=\"md-link\" href=\"$1\" target=\"_blank\" rel=\"noopener noreferrer\">$1</a>", RegexOptions.IgnoreCase);
